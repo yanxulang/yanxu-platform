@@ -40,9 +40,16 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: 安装 Linux 图形开发库
         if: runner.os == 'Linux'
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          set -euo pipefail
+          # GitHub ARM64 执行器偶发无法访问 ports.ubuntu.com 的 HTTP/IPv6 端点。
+          # 使用 HTTPS、IPv4 与 apt 自带重试，仍在失败时保持任务失败。
+          sudo sed -i 's|http://ports.ubuntu.com|https://ports.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
+            /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y \
             libfontconfig1-dev libwayland-dev libxkbcommon-dev \
             libxkbcommon-x11-dev xvfb
       - name: 准备 Rust 质量工具
