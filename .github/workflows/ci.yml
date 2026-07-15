@@ -177,8 +177,9 @@ jobs:
           grep -F 'e4a1b7c7b28bd7a6c229dc19d597e5a2fcf721ca' docs/ARTIFACT_PROVENANCE.md
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
             -czf yanxu-platform-0.1.0-six-targets.tar.gz \
-            src native vendor api docs examples tests dist Cargo.toml Cargo.lock \
-            deny.toml 言序.toml README.md CHANGELOG.md SECURITY.md LICENSE-MIT LICENSE-APACHE
+            .gitattributes .github .gitignore src native vendor api docs examples tests dist scripts \
+            Cargo.toml Cargo.lock deny.toml 言序.toml 言序.toml.in \
+            README.md CHANGELOG.md SECURITY.md LICENSE-MIT LICENSE-APACHE
           sha256sum yanxu-platform-0.1.0-six-targets.tar.gz \
             > yanxu-platform-0.1.0-six-targets.sha256
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
