@@ -120,6 +120,7 @@ struct Runner {
     window_ids: HashMap<WindowId, u64>,
     context: Context<OwnedDisplayHandle>,
     renderer: RenderEngine,
+    loaded_fonts: BTreeSet<u64>,
     focused: HashSet<WindowId>,
     hovered_files: HashSet<WindowId>,
     fatal: Option<&'static str>,
@@ -142,6 +143,7 @@ impl Runner {
             window_ids: HashMap::new(),
             context,
             renderer: RenderEngine::new(),
+            loaded_fonts: BTreeSet::new(),
             focused: HashSet::new(),
             hovered_files: HashSet::new(),
             fatal: None,
@@ -413,6 +415,7 @@ impl Runner {
     }
 
     fn render(&mut self, model_id: u64) {
+        self.sync_fonts();
         let Some(native) = self.windows.get_mut(&model_id) else {
             return;
         };
@@ -466,6 +469,15 @@ impl Runner {
         buffer.copy_from_slice(&pixels);
         if buffer.present().is_err() {
             self.fail("PLATFORM_PRESENT");
+        }
+    }
+
+    fn sync_fonts(&mut self) {
+        let fonts = self.model.lock().expect("platform model poisoned").fonts();
+        for (id, bytes) in fonts {
+            if self.loaded_fonts.insert(id) {
+                self.renderer.load_font_data(bytes);
+            }
         }
     }
 
@@ -877,33 +889,28 @@ impl Runner {
     }
 
     fn handle_ime(&mut self, model_id: u64, ime: Ime) {
-        match ime {
-            Ime::Enabled => self.push(PlatformEvent::new(
-                EventKind::ImeStarted,
-                Some(model_id),
-                monotonic_seconds(),
-            )),
-            Ime::Preedit(text, selection) => {
-                let mut event =
-                    PlatformEvent::new(EventKind::ImeUpdated, Some(model_id), monotonic_seconds())
-                        .with("文本", text);
-                if let Some((start, end)) = selection {
-                    event = event
-                        .with("选区起", i64::try_from(start).unwrap_or(i64::MAX))
-                        .with("选区终", i64::try_from(end).unwrap_or(i64::MAX));
-                }
-                self.push(event);
+        self.push(ime_event(model_id, ime, monotonic_seconds()));
+    }
+}
+
+fn ime_event(model_id: u64, ime: Ime, time_seconds: f64) -> PlatformEvent {
+    match ime {
+        Ime::Enabled => PlatformEvent::new(EventKind::ImeStarted, Some(model_id), time_seconds),
+        Ime::Preedit(text, selection) => {
+            let mut event = PlatformEvent::new(EventKind::ImeUpdated, Some(model_id), time_seconds)
+                .with("文本", text);
+            if let Some((start, end)) = selection {
+                event = event
+                    .with("选区起", i64::try_from(start).unwrap_or(i64::MAX))
+                    .with("选区终", i64::try_from(end).unwrap_or(i64::MAX));
             }
-            Ime::Commit(text) => self.push(
-                PlatformEvent::new(EventKind::ImeCommitted, Some(model_id), monotonic_seconds())
-                    .with("文本", text),
-            ),
-            Ime::Disabled => self.push(PlatformEvent::new(
-                EventKind::ImeCancelled,
-                Some(model_id),
-                monotonic_seconds(),
-            )),
+            event
         }
+        Ime::Commit(text) => {
+            PlatformEvent::new(EventKind::ImeCommitted, Some(model_id), time_seconds)
+                .with("文本", text)
+        }
+        Ime::Disabled => PlatformEvent::new(EventKind::ImeCancelled, Some(model_id), time_seconds),
     }
 }
 
@@ -1209,5 +1216,24 @@ mod tests {
         assert_eq!(ime_purpose("普通"), ImePurpose::Normal);
         assert_eq!(cursor_icon("文本"), CursorIcon::Text);
         assert_eq!(cursor_icon("未知"), CursorIcon::Default);
+    }
+
+    #[test]
+    fn maps_chinese_ime_preedit_commit_and_lifecycle() {
+        let started = ime_event(9, Ime::Enabled, 1.0);
+        assert_eq!(started.kind, EventKind::ImeStarted);
+
+        let updated = ime_event(9, Ime::Preedit("言序".to_owned(), Some((0, 3))), 2.0);
+        assert_eq!(updated.kind, EventKind::ImeUpdated);
+        assert_eq!(updated.fields["文本"], Data::String("言序".to_owned()));
+        assert_eq!(updated.fields["选区起"], Data::Integer(0));
+        assert_eq!(updated.fields["选区终"], Data::Integer(3));
+
+        let committed = ime_event(9, Ime::Commit("言序".to_owned()), 3.0);
+        assert_eq!(committed.kind, EventKind::ImeCommitted);
+        assert_eq!(committed.fields["文本"], Data::String("言序".to_owned()));
+
+        let cancelled = ime_event(9, Ime::Disabled, 4.0);
+        assert_eq!(cancelled.kind, EventKind::ImeCancelled);
     }
 }

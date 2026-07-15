@@ -1343,6 +1343,12 @@ fn text_options(config: &BTreeMap<String, Data>) -> Result<TextOptions, &'static
     if let Some(value) = config.get("字族") {
         options.family = Some(text(value)?.to_owned());
     }
+    if let Some(value) = config.get("字重") {
+        options.weight = u16::try_from(integer(value)?).map_err(|_| "PLATFORM_TEXT_OPTIONS")?;
+    }
+    if let Some(value) = config.get("斜体") {
+        options.italic = boolean(value)?;
+    }
     if let Some(value) = config.get("字号") {
         options.font_size = number(value)? as f32;
     }
@@ -1368,7 +1374,10 @@ fn layout_data(layout: &TextLayout) -> Data {
         .map(|glyph| {
             Data::map([
                 ("字体", Data::String(glyph.font.clone())),
+                ("字族", Data::String(glyph.font.clone())),
                 ("字形", Data::Integer(i64::from(glyph.glyph_id))),
+                ("字重", Data::Integer(i64::from(glyph.weight))),
+                ("斜体", Data::Bool(glyph.italic)),
                 ("原文起", Data::Integer(glyph.source_start as i64)),
                 ("原文终", Data::Integer(glyph.source_end as i64)),
                 ("横坐标", Data::Number(f64::from(glyph.x))),
@@ -1507,6 +1516,10 @@ mod tests {
         assert_eq!(
             protocol_info().as_map().unwrap()["事件次"],
             Data::Integer(EVENT_MINOR)
+        );
+        assert_eq!(
+            protocol_info().as_map().unwrap()["绘制次"],
+            Data::Integer(i64::from(protocol::DRAW_MINOR))
         );
         assert_eq!(
             capabilities().as_map().unwrap()["原生窗口"],

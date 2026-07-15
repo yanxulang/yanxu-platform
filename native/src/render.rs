@@ -1,7 +1,11 @@
 //! 绘制协议 v1 的统一 CPU 栅格化实现。
 
 use crate::protocol::{self, PayloadReader};
-use cosmic_text::{Attrs, Buffer, Color as TextColor, FontSystem, Metrics, Shaping, SwashCache};
+use cosmic_text::fontdb::{Family as DbFamily, Query, Stretch, Style, Weight};
+use cosmic_text::{
+    Attrs, Buffer, CacheKey, CacheKeyFlags, Color as TextColor, Family, FontSystem, Metrics,
+    Shaping, SwashCache,
+};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use tiny_skia::{
@@ -23,16 +27,26 @@ pub const OP_SHADOW: u16 = 12;
 pub const OP_TEXT: u16 = 13;
 pub const OP_IMAGE: u16 = 14;
 pub const OP_PATH: u16 = 15;
+pub const OP_TEXT_STYLE: u16 = 16;
+pub const OP_GLYPH_RUN: u16 = 17;
 
 const MAX_DIMENSION: u32 = 16_384;
 const MAX_STATE_DEPTH: usize = 256;
 const MAX_PATH_VERBS: usize = 65_536;
+const MAX_GLYPHS_PER_RUN: usize = 262_144;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageData {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PositionedGlyph {
+    glyph_id: u16,
+    x: f32,
+    baseline: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +135,10 @@ impl RenderEngine {
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
         }
+    }
+
+    pub fn load_font_data(&mut self, bytes: Vec<u8>) {
+        self.font_system.db_mut().load_font_data(bytes);
     }
 
     pub fn render<F>(
@@ -324,6 +342,9 @@ impl RenderEngine {
                         font_size,
                         line_height,
                         color,
+                        "",
+                        400,
+                        false,
                         &text,
                     );
                 }
@@ -343,6 +364,73 @@ impl RenderEngine {
                     }
                 }
                 OP_PATH => draw_path(&mut pixmap, &state, &command.payload)?,
+                OP_TEXT_STYLE => {
+                    let mut reader = PayloadReader::new(&command.payload);
+                    let x = reader.f32()?;
+                    let y = reader.f32()?;
+                    let max_width = positive(reader.f32()?, OP_TEXT_STYLE)?;
+                    let font_size = positive(reader.f32()?, OP_TEXT_STYLE)?;
+                    let line_height = positive(reader.f32()?, OP_TEXT_STYLE)?;
+                    let color = read_rgba(&mut reader, state.opacity)?;
+                    let (weight, italic) = read_weight_style(&mut reader, OP_TEXT_STYLE)?;
+                    let family = reader.text()?.to_owned();
+                    let text = reader.text()?.to_owned();
+                    reader
+                        .finish()
+                        .map_err(|_| RenderError::Payload(OP_TEXT_STYLE))?;
+                    self.draw_text(
+                        &mut pixmap,
+                        &state,
+                        [x, y],
+                        max_width,
+                        font_size,
+                        line_height,
+                        color,
+                        &family,
+                        weight,
+                        italic,
+                        &text,
+                    );
+                }
+                OP_GLYPH_RUN => {
+                    let mut reader = PayloadReader::new(&command.payload);
+                    let origin = [reader.f32()?, reader.f32()?];
+                    let font_size = positive(reader.f32()?, OP_GLYPH_RUN)?;
+                    let color = read_rgba(&mut reader, state.opacity)?;
+                    let (weight, italic) = read_weight_style(&mut reader, OP_GLYPH_RUN)?;
+                    let family = reader.text()?.to_owned();
+                    let count = usize::try_from(reader.u32()?)
+                        .map_err(|_| RenderError::Payload(OP_GLYPH_RUN))?;
+                    if count > MAX_GLYPHS_PER_RUN {
+                        return Err(RenderError::Payload(OP_GLYPH_RUN));
+                    }
+                    let mut glyphs = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let glyph_id = reader.u16()?;
+                        if reader.u16()? != 0 {
+                            return Err(RenderError::Payload(OP_GLYPH_RUN));
+                        }
+                        glyphs.push(PositionedGlyph {
+                            glyph_id,
+                            x: reader.f32()?,
+                            baseline: reader.f32()?,
+                        });
+                    }
+                    reader
+                        .finish()
+                        .map_err(|_| RenderError::Payload(OP_GLYPH_RUN))?;
+                    self.draw_glyph_run(
+                        &mut pixmap,
+                        &state,
+                        origin,
+                        font_size,
+                        color,
+                        &family,
+                        weight,
+                        italic,
+                        &glyphs,
+                    );
+                }
                 _ => {
                     // 带长度记录允许同一主版本的旧后端安全跳过新操作码。
                 }
@@ -364,6 +452,9 @@ impl RenderEngine {
         font_size: f32,
         line_height: f32,
         color: [u8; 4],
+        family: &str,
+        weight: u16,
+        italic: bool,
         text: &str,
     ) {
         let mut point = tiny_skia::Point::from_xy(origin[0], origin[1]);
@@ -376,7 +467,15 @@ impl RenderEngine {
         );
         let mut buffer = buffer.borrow_with(&mut self.font_system);
         buffer.set_size(Some(max_width * scale), None);
-        buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
+        let attrs = Attrs::new()
+            .family(if family.is_empty() {
+                Family::SansSerif
+            } else {
+                Family::Name(family)
+            })
+            .weight(Weight(weight))
+            .style(if italic { Style::Italic } else { Style::Normal });
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(true);
         let text_color = TextColor::rgba(color[0], color[1], color[2], color[3]);
         let clip = state.clip.as_ref().map(Mask::data);
@@ -406,6 +505,96 @@ impl RenderEngine {
             },
         );
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_glyph_run(
+        &mut self,
+        pixmap: &mut Pixmap,
+        state: &RenderState,
+        origin: [f32; 2],
+        font_size: f32,
+        color: [u8; 4],
+        family: &str,
+        weight: u16,
+        italic: bool,
+        glyphs: &[PositionedGlyph],
+    ) {
+        let query = Query {
+            families: if family.is_empty() {
+                &[DbFamily::SansSerif]
+            } else {
+                &[DbFamily::Name(family)]
+            },
+            weight: Weight(weight),
+            stretch: Stretch::Normal,
+            style: if italic { Style::Italic } else { Style::Normal },
+        };
+        let Some(font_id) = self.font_system.db().query(&query) else {
+            return;
+        };
+        let fake_italic = italic
+            && self
+                .font_system
+                .db()
+                .face(font_id)
+                .is_some_and(|face| face.style == Style::Normal);
+        let flags = if fake_italic {
+            CacheKeyFlags::FAKE_ITALIC
+        } else {
+            CacheKeyFlags::empty()
+        };
+        let (scale_x, scale_y) = state.transform.get_scale();
+        let scale = ((scale_x.abs() + scale_y.abs()) * 0.5).max(0.01);
+        let clip = state.clip.as_ref().map(Mask::data);
+        let surface_width = pixmap.width() as usize;
+        let surface_height = pixmap.height() as usize;
+        let data = pixmap.data_mut();
+        let text_color = TextColor::rgba(color[0], color[1], color[2], color[3]);
+        for glyph in glyphs {
+            let mut point =
+                tiny_skia::Point::from_xy(origin[0] + glyph.x, origin[1] + glyph.baseline);
+            state.transform.map_point(&mut point);
+            let (key, base_x, base_y) = CacheKey::new(
+                font_id,
+                glyph.glyph_id,
+                font_size * scale,
+                (point.x, point.y),
+                Weight(weight),
+                flags,
+            );
+            self.swash_cache.with_pixels(
+                &mut self.font_system,
+                key,
+                text_color,
+                |x, y, glyph_color| {
+                    let alpha =
+                        ((u16::from(glyph_color.a()) * u16::from(color[3]) + 127) / 255) as u8;
+                    blend_glyph_pixel(
+                        data,
+                        surface_width,
+                        surface_height,
+                        clip,
+                        base_x + x,
+                        base_y + y,
+                        [glyph_color.r(), glyph_color.g(), glyph_color.b(), alpha],
+                    );
+                },
+            );
+        }
+    }
+}
+
+fn read_weight_style(
+    reader: &mut PayloadReader<'_>,
+    opcode: u16,
+) -> Result<(u16, bool), RenderError> {
+    let weight = reader.u16()?;
+    let italic = reader.u8()?;
+    let reserved = reader.u8()?;
+    if !(1..=1_000).contains(&weight) || italic > 1 || reserved != 0 {
+        return Err(RenderError::Payload(opcode));
+    }
+    Ok((weight, italic != 0))
 }
 
 fn empty_payload(payload: &[u8], opcode: u16) -> Result<(), RenderError> {
@@ -723,6 +912,31 @@ fn blend_glyph(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn blend_glyph_pixel(
+    data: &mut [u8],
+    surface_width: usize,
+    surface_height: usize,
+    clip: Option<&[u8]>,
+    x: i32,
+    y: i32,
+    color: [u8; 4],
+) {
+    let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {
+        return;
+    };
+    if x >= surface_width || y >= surface_height {
+        return;
+    }
+    let pixel_index = y * surface_width + x;
+    let clip_alpha = clip.map_or(255, |mask| mask[pixel_index]);
+    if clip_alpha == 0 || color[3] == 0 {
+        return;
+    }
+    let byte_index = pixel_index * 4;
+    blend_pixel(&mut data[byte_index..byte_index + 4], color, clip_alpha);
+}
+
 fn blend_pixel(destination: &mut [u8], color: [u8; 4], clip_alpha: u8) {
     let source_alpha = (u32::from(color[3]) * u32::from(clip_alpha) + 127) / u32::from(u8::MAX);
     let inverse = u32::from(u8::MAX) - source_alpha;
@@ -739,6 +953,7 @@ fn blend_pixel(destination: &mut [u8], color: [u8; 4], clip_alpha: u8) {
 mod tests {
     use super::*;
     use crate::protocol::{Command, Frame, PayloadWriter, encode};
+    use crate::text::{TextOptions, TextService};
 
     fn command(opcode: u16, write: impl FnOnce(&mut PayloadWriter)) -> Command {
         let mut writer = PayloadWriter::new();
@@ -819,6 +1034,57 @@ mod tests {
             .unwrap();
         assert!(rendered.rgba().chunks_exact(4).any(|pixel| pixel[2] > 100));
         assert_eq!(rendered.xrgb().len(), 48 * 40);
+    }
+
+    #[test]
+    fn styled_text_and_positioned_glyph_runs_share_font_selection() {
+        let mut text = TextService::new();
+        let layout = text.shape("A", &TextOptions::default()).unwrap();
+        let glyph = layout.glyphs.first().expect("A must shape");
+        assert!(!glyph.font.is_empty());
+
+        let frame = Frame {
+            commands: vec![
+                command(OP_CLEAR, |writer| rgba(writer, [0, 0, 0, 255])),
+                command(OP_TEXT_STYLE, |writer| {
+                    for value in [2.0, 2.0, 92.0, 18.0, 22.0] {
+                        writer.f32(value).unwrap();
+                    }
+                    rgba(writer, [255, 255, 255, 255]);
+                    writer.u16(glyph.weight);
+                    writer.u8(u8::from(glyph.italic));
+                    writer.u8(0);
+                    writer.text(&glyph.font).unwrap();
+                    writer.text("言界 A").unwrap();
+                }),
+                command(OP_GLYPH_RUN, |writer| {
+                    for value in [52.0, 2.0, 18.0] {
+                        writer.f32(value).unwrap();
+                    }
+                    rgba(writer, [40, 220, 100, 255]);
+                    writer.u16(glyph.weight);
+                    writer.u8(u8::from(glyph.italic));
+                    writer.u8(0);
+                    writer.text(&glyph.font).unwrap();
+                    writer.u32(1);
+                    writer.u16(glyph.glyph_id);
+                    writer.u16(0);
+                    writer.f32(0.0).unwrap();
+                    writer.f32(glyph.baseline).unwrap();
+                }),
+            ],
+            ..Frame::default()
+        };
+        let bytes = encode(&frame).unwrap();
+        let rendered = RenderEngine::new()
+            .render(&bytes, 96, 32, 1.0, |_| None)
+            .unwrap();
+        assert!(
+            rendered
+                .rgba()
+                .chunks_exact(4)
+                .any(|pixel| pixel[0] > 0 || pixel[1] > 0 || pixel[2] > 0)
+        );
     }
 
     #[test]

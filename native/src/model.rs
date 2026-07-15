@@ -223,6 +223,19 @@ impl Model {
     }
 
     #[must_use]
+    pub fn fonts(&self) -> Vec<(u64, Vec<u8>)> {
+        self.resources
+            .values()
+            .filter_map(|node| match &node.state {
+                ResourceState::Font {
+                    bytes: Some(bytes), ..
+                } => Some((node.id, bytes.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[must_use]
     pub fn application_exit_requested(&self, id: u64) -> Option<bool> {
         let ResourceState::Application { exit_requested, .. } = &self.get(id).ok()?.state else {
             return None;
@@ -421,5 +434,23 @@ mod tests {
                 .next_timer_deadline()
                 .is_some_and(|deadline| deadline > now)
         );
+    }
+
+    #[test]
+    fn exposes_loaded_font_bytes_for_renderer_synchronization() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        let font = model
+            .create(
+                Some(application),
+                ResourceState::Font {
+                    family: "测试字族".to_owned(),
+                    bytes: Some(vec![1, 2, 3]),
+                },
+            )
+            .unwrap();
+        assert_eq!(model.fonts(), vec![(font, vec![1, 2, 3])]);
+        model.close(font).unwrap();
+        assert!(model.fonts().is_empty());
     }
 }

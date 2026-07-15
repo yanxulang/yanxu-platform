@@ -3,12 +3,14 @@
 use crate::data::Data;
 use crate::protocol::{self, Command, Frame, PayloadWriter};
 use crate::render::{
-    OP_CIRCLE, OP_CLEAR, OP_CLIP_RECT, OP_FILL_RECT, OP_IMAGE, OP_LAYER, OP_LINE, OP_PATH,
-    OP_RESTORE, OP_ROUNDED_RECT, OP_SAVE, OP_SHADOW, OP_STROKE_RECT, OP_TEXT, OP_TRANSFORM,
+    OP_CIRCLE, OP_CLEAR, OP_CLIP_RECT, OP_FILL_RECT, OP_GLYPH_RUN, OP_IMAGE, OP_LAYER, OP_LINE,
+    OP_PATH, OP_RESTORE, OP_ROUNDED_RECT, OP_SAVE, OP_SHADOW, OP_STROKE_RECT, OP_TEXT,
+    OP_TEXT_STYLE, OP_TRANSFORM,
 };
 use std::collections::BTreeMap;
 
 const MAX_PATH_SEGMENTS: usize = u16::MAX as usize;
+const MAX_GLYPHS_PER_RUN: usize = 262_144;
 
 pub fn encode_commands(value: &Data) -> Result<Vec<u8>, &'static str> {
     let commands = array(value)?;
@@ -98,10 +100,45 @@ fn build_command(value: &Data) -> Result<Command, &'static str> {
             write_positive(&mut writer, required_number(command, "字号")?)?;
             write_positive(&mut writer, required_number(command, "行高")?)?;
             write_color(&mut writer, required(command, "颜色")?)?;
+            let text = required_text(command, "文本")?;
+            if command.contains_key("字族")
+                || command.contains_key("字重")
+                || command.contains_key("斜体")
+            {
+                write_weight_style(&mut writer, command)?;
+                writer
+                    .text(optional_text(command, "字族")?.unwrap_or(""))
+                    .map_err(|_| "PLATFORM_DRAW_LIMIT")?;
+                writer.text(text).map_err(|_| "PLATFORM_DRAW_LIMIT")?;
+                OP_TEXT_STYLE
+            } else {
+                writer.text(text).map_err(|_| "PLATFORM_DRAW_LIMIT")?;
+                OP_TEXT
+            }
+        }
+        "字形序列" => {
+            write_float_array(&mut writer, required(command, "位置")?, 2)?;
+            write_positive(&mut writer, required_number(command, "字号")?)?;
+            write_color(&mut writer, required(command, "颜色")?)?;
+            write_weight_style(&mut writer, command)?;
             writer
-                .text(required_text(command, "文本")?)
+                .text(required_text(command, "字族")?)
                 .map_err(|_| "PLATFORM_DRAW_LIMIT")?;
-            OP_TEXT
+            let glyphs = array(required(command, "字形")?)?;
+            if glyphs.len() > MAX_GLYPHS_PER_RUN {
+                return Err("PLATFORM_DRAW_LIMIT");
+            }
+            writer.u32(u32::try_from(glyphs.len()).map_err(|_| "PLATFORM_DRAW_LIMIT")?);
+            for glyph in glyphs {
+                let glyph = map(glyph)?;
+                let glyph_id = u16::try_from(integer(required(glyph, "字形")?)?)
+                    .map_err(|_| "PLATFORM_DRAW_RANGE")?;
+                writer.u16(glyph_id);
+                writer.u16(0);
+                write_f32(&mut writer, required_number(glyph, "横坐标")?)?;
+                write_f32(&mut writer, required_number(glyph, "基线")?)?;
+            }
+            OP_GLYPH_RUN
         }
         "图片" => {
             let Data::Resource(handle) = required(command, "图片")? else {
@@ -215,6 +252,20 @@ fn write_color(writer: &mut PayloadWriter, value: &Data) -> Result<(), &'static 
     Ok(())
 }
 
+fn write_weight_style(
+    writer: &mut PayloadWriter,
+    command: &BTreeMap<String, Data>,
+) -> Result<(), &'static str> {
+    let weight = optional_integer(command, "字重")?.unwrap_or(400);
+    if !(1..=1_000).contains(&weight) {
+        return Err("PLATFORM_DRAW_RANGE");
+    }
+    writer.u16(u16::try_from(weight).map_err(|_| "PLATFORM_DRAW_RANGE")?);
+    writer.u8(u8::from(optional_bool(command, "斜体")?.unwrap_or(false)));
+    writer.u8(0);
+    Ok(())
+}
+
 fn write_positive(writer: &mut PayloadWriter, value: f64) -> Result<(), &'static str> {
     if value <= 0.0 {
         return Err("PLATFORM_DRAW_RANGE");
@@ -259,6 +310,17 @@ fn required_number(map: &BTreeMap<String, Data>, key: &str) -> Result<f64, &'sta
 
 fn optional_number(map: &BTreeMap<String, Data>, key: &str) -> Result<Option<f64>, &'static str> {
     map.get(key).map(number).transpose()
+}
+
+fn optional_integer(map: &BTreeMap<String, Data>, key: &str) -> Result<Option<i64>, &'static str> {
+    map.get(key).map(integer).transpose()
+}
+
+fn optional_text<'a>(
+    map: &'a BTreeMap<String, Data>,
+    key: &str,
+) -> Result<Option<&'a str>, &'static str> {
+    map.get(key).map(text).transpose()
 }
 
 fn optional_bool(map: &BTreeMap<String, Data>, key: &str) -> Result<Option<bool>, &'static str> {
@@ -359,6 +421,64 @@ mod tests {
         assert_eq!(
             &rendered.rgba()[4 * (4 * 8 + 4)..][..4],
             &[20, 100, 220, 255]
+        );
+    }
+
+    #[test]
+    fn compiles_styled_text_and_glyph_runs_as_v1_1_commands() {
+        let color = || {
+            Data::Array(vec![
+                Data::Integer(10),
+                Data::Integer(20),
+                Data::Integer(30),
+                Data::Integer(255),
+            ])
+        };
+        let commands = Data::Array(vec![
+            Data::map([
+                ("类型", Data::String("文字".to_owned())),
+                (
+                    "位置",
+                    Data::Array(vec![Data::Integer(1), Data::Integer(2)]),
+                ),
+                ("最大宽", Data::Integer(200)),
+                ("字号", Data::Integer(16)),
+                ("行高", Data::Integer(22)),
+                ("颜色", color()),
+                ("字族", Data::String("测试字族".to_owned())),
+                ("字重", Data::Integer(700)),
+                ("斜体", Data::Bool(true)),
+                ("文本", Data::String("言序".to_owned())),
+            ]),
+            Data::map([
+                ("类型", Data::String("字形序列".to_owned())),
+                (
+                    "位置",
+                    Data::Array(vec![Data::Integer(3), Data::Integer(4)]),
+                ),
+                ("字号", Data::Integer(16)),
+                ("颜色", color()),
+                ("字族", Data::String("测试字族".to_owned())),
+                ("字重", Data::Integer(400)),
+                (
+                    "字形",
+                    Data::Array(vec![Data::map([
+                        ("字形", Data::Integer(42)),
+                        ("横坐标", Data::Integer(0)),
+                        ("基线", Data::Integer(18)),
+                    ])]),
+                ),
+            ]),
+        ]);
+        let frame = protocol::decode(&encode_commands(&commands).unwrap()).unwrap();
+        assert_eq!(frame.minor, 1);
+        assert_eq!(
+            frame
+                .commands
+                .iter()
+                .map(|command| command.opcode)
+                .collect::<Vec<_>>(),
+            vec![OP_TEXT_STYLE, OP_GLYPH_RUN]
         );
     }
 

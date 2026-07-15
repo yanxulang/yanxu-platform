@@ -9,7 +9,7 @@ use std::fmt::{self, Display, Formatter};
 
 pub const DRAW_MAGIC: [u8; 4] = *b"YXDR";
 pub const DRAW_MAJOR: u16 = 1;
-pub const DRAW_MINOR: u16 = 0;
+pub const DRAW_MINOR: u16 = 1;
 pub const MAX_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COMMANDS: usize = 65_536;
 pub const MAX_COMMAND_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;

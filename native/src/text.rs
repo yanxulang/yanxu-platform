@@ -13,6 +13,8 @@ const MAX_LAYOUT_WIDTH: f32 = 1_000_000.0;
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextOptions {
     pub family: Option<String>,
+    pub weight: u16,
+    pub italic: bool,
     pub font_size: f32,
     pub line_height: f32,
     pub max_width: Option<f32>,
@@ -23,6 +25,8 @@ impl Default for TextOptions {
     fn default() -> Self {
         Self {
             family: None,
+            weight: 400,
+            italic: false,
             font_size: 16.0,
             line_height: 22.0,
             max_width: None,
@@ -44,6 +48,8 @@ pub struct FontMatch {
 pub struct ShapedGlyph {
     pub font: String,
     pub glyph_id: u16,
+    pub weight: u16,
+    pub italic: bool,
     pub source_start: usize,
     pub source_end: usize,
     pub x: f32,
@@ -233,9 +239,19 @@ impl TextService {
             Wrap::None
         });
         buffer.set_size(options.max_width, None);
-        let attrs = options.family.as_deref().map_or_else(Attrs::new, |family| {
-            Attrs::new().family(Family::Name(family))
-        });
+        let attrs = options
+            .family
+            .as_deref()
+            .filter(|family| !family.is_empty())
+            .map_or_else(Attrs::new, |family| {
+                Attrs::new().family(Family::Name(family))
+            })
+            .weight(Weight(options.weight))
+            .style(if options.italic {
+                Style::Italic
+            } else {
+                Style::Normal
+            });
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, true);
 
@@ -249,8 +265,19 @@ impl TextService {
             let source_offset = line_offsets.get(run.line_i).copied().unwrap_or(0);
             let glyph_start = glyphs.len();
             for glyph in run.glyphs {
+                let (family, italic) = self.font_system.db().face(glyph.font_id).map_or_else(
+                    || (options.family.clone().unwrap_or_default(), options.italic),
+                    |face| {
+                        (
+                            face.families
+                                .first()
+                                .map_or_else(String::new, |(name, _)| name.clone()),
+                            options.italic || face.style != Style::Normal,
+                        )
+                    },
+                );
                 glyphs.push(ShapedGlyph {
-                    font: format!("{:?}", glyph.font_id),
+                    font: family,
                     glyph_id: glyph.glyph_id,
                     source_start: source_offset.saturating_add(glyph.start),
                     source_end: source_offset.saturating_add(glyph.end),
@@ -258,6 +285,8 @@ impl TextService {
                     baseline: run.line_y + glyph.y,
                     width: glyph.w,
                     rtl: run.rtl,
+                    weight: glyph.font_weight.0,
+                    italic,
                 });
             }
             let glyph_end = glyphs.len();
@@ -295,6 +324,7 @@ fn validate(text: &str, options: &TextOptions) -> Result<(), TextError> {
         || options.line_height <= 0.0
         || options.font_size > MAX_LAYOUT_WIDTH
         || options.line_height > MAX_LAYOUT_WIDTH
+        || !(1..=1_000).contains(&options.weight)
         || options
             .max_width
             .is_some_and(|width| !width.is_finite() || width <= 0.0 || width > MAX_LAYOUT_WIDTH)
@@ -341,6 +371,13 @@ mod tests {
                 .all(|glyph| glyph.source_start <= glyph.source_end && glyph.source_end <= 5)
         );
         assert!(layout.glyphs.iter().any(|glyph| glyph.source_end >= 4));
+        assert!(layout.glyphs.iter().all(|glyph| !glyph.font.is_empty()));
+        assert!(
+            layout
+                .glyphs
+                .iter()
+                .all(|glyph| (1..=1_000).contains(&glyph.weight))
+        );
     }
 
     #[test]
@@ -361,6 +398,16 @@ mod tests {
                 "text",
                 &TextOptions {
                     font_size: f32::NAN,
+                    ..TextOptions::default()
+                }
+            ),
+            Err(TextError::Options)
+        );
+        assert_eq!(
+            service.shape(
+                "text",
+                &TextOptions {
+                    weight: 0,
                     ..TextOptions::default()
                 }
             ),
