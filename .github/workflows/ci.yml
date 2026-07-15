@@ -168,45 +168,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: yanxu-platform-*
-          path: ${{ runner.temp }}/native
-      - name: 重建完整原生索引与可复现发布包
+      - name: 核对固定制品来源并创建确定性发布包
         shell: bash
         run: |
           set -euo pipefail
-          cp 言序.toml.in 言序.toml
-          targets=(
-            x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
-            x86_64-apple-darwin aarch64-apple-darwin
-            x86_64-pc-windows-msvc aarch64-pc-windows-msvc
-          )
-          for target in "${targets[@]}"; do
-            source_dir="$RUNNER_TEMP/native/yanxu-platform-$target/dist/$target"
-            test "$(find "$source_dir" -maxdepth 1 -type f | wc -l)" -eq 1
-            source="$(find "$source_dir" -maxdepth 1 -type f -print -quit)"
-            destination="dist/$target/$(basename "$source")"
-            mkdir -p "$(dirname "$destination")"
-            test -f "$destination"
-            cmp "$destination" "$source"
-            cp "$source" "$destination"
-            case "$target" in
-              *-apple-darwin) os=macos ;;
-              *-pc-windows-*) os=windows ;;
-              *-unknown-linux-*) os=linux ;;
-            esac
-            case "$target" in aarch64-*) arch=arm64 ;; x86_64-*) arch=x64 ;; esac
-            checksum="$(sha256sum "$destination" | awk '{print $1}')"
-            size="$(wc -c < "$destination" | tr -d ' ')"
-            {
-              printf '[原生.%s.%s]\n' "$os" "$arch"
-              printf '文件 = "dist/%s/%s"\n' "$target" "$(basename "$destination")"
-              printf '校验和 = "%s"\n' "$checksum"
-              printf '大小 = %s\n' "$size"
-            } >> 言序.toml
-          done
-          test "$(find dist -type f | wc -l)" -eq 6
+          sh scripts/verify-release-source.sh
+          grep -F '29427247716' docs/ARTIFACT_PROVENANCE.md
+          grep -F 'e4a1b7c7b28bd7a6c229dc19d597e5a2fcf721ca' docs/ARTIFACT_PROVENANCE.md
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
             -czf yanxu-platform-0.1.0-six-targets.tar.gz \
             src native vendor api docs examples tests dist Cargo.toml Cargo.lock \
