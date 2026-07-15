@@ -1,0 +1,31 @@
+lock_version = 2
+manifest_checksum = "e653df7812ecbb44cb2e9f9ebb49e9d23fb9447138ae3baf4d68778b3e00fe70"
+target = "aarch64-apple-darwin"
+generator = "1.1.7"
+
+[root_dependencies]
+"言台" = "yanxu-platform@0.1.0#a5b4b144f221-57e6d90fc9e92cb2"
+
+[root_dev_dependencies]
+
+[[package]]
+id = "yanxu-platform@0.1.0#a5b4b144f221-57e6d90fc9e92cb2"
+name = "yanxu-platform"
+version = "0.1.0"
+source = "path:.."
+checksum = "57e6d90fc9e92cb2689538364a94294e502477c1acaf6bd6c2efd1084de56f19"
+entry = "src/主.yx"
+target = "aarch64-apple-darwin"
+minimum_yanxu = ">=1.1.7"
+
+[package.dependencies]
+
+[package.exports]
+"默认" = "src/主.yx"
+
+[package.native]
+abi = 2
+target = "aarch64-apple-darwin"
+path = "dist/aarch64-apple-darwin/libyanxu_platform_native.dylib"
+checksum = "b9fa510fab0b7de1f9bb1ef27e34bb4042239a323064e490b87d7d48d953bb33"
+size = 4795984

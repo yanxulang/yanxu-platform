@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已存在并指向通过 CI 的版本标签
+        required: true
+        type: string
+      ci_run_id:
+        description: 产出六目标候选包的成功 CI 运行编号
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - name: 核对标签与 CI 提交完全一致
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh run view "$CI_RUN_ID" --json conclusion --jq .conclusion)" = success
+          test "$(gh run view "$CI_RUN_ID" --json workflowName --jq .workflowName)" = CI
+          test "$(gh run view "$CI_RUN_ID" --json headSha --jq .headSha)" = "$(git rev-list -n 1 "$TAG")"
+      - name: 下载已经验收的六目标候选包
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: gh run download "$CI_RUN_ID" --name yanxu-platform-six-targets --dir release
+      - name: 发布 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum --check yanxu-platform-0.1.0-six-targets.sha256)
+          gh release create "$TAG" \
+            release/yanxu-platform-0.1.0-six-targets.tar.gz \
+            release/yanxu-platform-0.1.0-six-targets.sha256 \
+            release/言序.toml \
+            --verify-tag --title "言台 0.1.0" --generate-notes

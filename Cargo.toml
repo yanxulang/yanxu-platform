@@ -1,0 +1,22 @@
+[workspace]
+members = ["native"]
+exclude = ["vendor/wayland-scanner"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.92"
+repository = "https://github.com/yanxulang/yanxu-platform"
+
+[patch.crates-io]
+# wayland-scanner 0.31.10 尚固定在有漏洞的 quick-xml 0.39；复用其已发布
+# 源码并只升级 XML 解析器，保持 Wayland 生成接口不变。
+wayland-scanner = { path = "vendor/wayland-scanner" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = "deny"

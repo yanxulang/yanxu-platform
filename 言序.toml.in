@@ -1,0 +1,22 @@
+[包]
+格式 = 2
+名称 = "yanxu-platform"
+版本 = "0.1.0"
+言序 = ">=1.1.7"
+入口 = "src/主.yx"
+说明 = "言序原生跨平台平台接口库"
+许可 = "MIT OR Apache-2.0"
+
+[导出]
+默认 = "src/主.yx"
+
+[权限]
+图形界面 = true
+原生扩展 = true
+剪贴板 = true
+文件对话框 = true
+
+[原生]
+ABI = 2
+
+# scripts/prepare-current.sh 在此后追加当前平台的制品、摘要与大小。

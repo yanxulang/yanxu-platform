@@ -1,0 +1,211 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            artifact: dist/x86_64-unknown-linux-gnu/libyanxu_platform_native.so
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            artifact: dist/aarch64-unknown-linux-gnu/libyanxu_platform_native.so
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            artifact: dist/x86_64-apple-darwin/libyanxu_platform_native.dylib
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            artifact: dist/aarch64-apple-darwin/libyanxu_platform_native.dylib
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            artifact: dist/x86_64-pc-windows-msvc/yanxu_platform_native.dll
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            artifact: dist/aarch64-pc-windows-msvc/yanxu_platform_native.dll
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: 安装 Linux 图形开发库
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev xvfb
+      - name: 准备 Rust 质量工具
+        run: rustup component add rustfmt clippy
+      - name: 核对原生架构
+        shell: bash
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_TARGET"
+      - name: 格式、单测与 Clippy
+        run: |
+          cargo fmt --all -- --check
+          cargo test --workspace --all-targets --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: 构建当前目标 ABI v2 后端
+        run: cargo build --workspace --release --locked
+      - name: 生成只含当前真实制品的包清单
+        shell: bash
+        run: ./scripts/prepare-current.sh
+      - name: 检出言序 1.1.7 工具链
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: YanXuLang/yanxu
+          path: yanxu-core
+          ref: v1.1.7
+      - name: 构建言序 1.1.7
+        run: cargo build --manifest-path yanxu-core/Cargo.toml --locked --bin yanxu
+      - name: 类型检查、原生集成和 API 漂移门禁
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then suffix=".exe"; fi
+          core="$GITHUB_WORKSPACE/yanxu-core/target/debug/yanxu$suffix"
+          "$core" 包 更新 examples
+          "$core" 包 更新 tests
+          "$core" 查 src/主.yx
+          for file in examples/*.yx tests/*.yx; do "$core" 查 "$file"; done
+          "$core" 字节 tests/平台包装.yx
+          "$core" 文 --json src/主.yx "$RUNNER_TEMP/api-v1.json"
+          "$core" 文 src/主.yx "$RUNNER_TEMP/API.md"
+          cmp api/api-v1.json "$RUNNER_TEMP/api-v1.json"
+          cmp docs/API.md "$RUNNER_TEMP/API.md"
+      - name: Linux 虚拟显示真实窗口自动退出冒烟
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          core="$GITHUB_WORKSPACE/yanxu-core/target/debug/yanxu"
+          xvfb-run -a "$core" 字节 examples/最小窗口.yx
+      - name: 核对 ABI v2 导出与制品摘要
+        shell: bash
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          set -euo pipefail
+          test -f "$ARTIFACT"
+          grep -F "$(wc -c < "$ARTIFACT" | tr -d ' ')" 言序.toml
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            nm -gU "$ARTIFACT" | grep -F yanxu_native_module_v2
+          elif [[ "$RUNNER_OS" == "Windows" ]]; then
+            vswhere=""
+            for candidate in \
+              "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" \
+              "/c/Program Files/Microsoft Visual Studio/Installer/vswhere.exe"; do
+              if [[ -x "$candidate" ]]; then vswhere="$candidate"; break; fi
+            done
+            test -n "$vswhere"
+            patterns=('VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe')
+            if [[ "$RUNNER_ARCH" == "ARM64" ]]; then
+              patterns=('VC\Tools\MSVC\**\bin\Hostarm64\arm64\dumpbin.exe' "${patterns[@]}")
+            fi
+            dumpbin=""
+            for pattern in "${patterns[@]}"; do
+              candidate="$("$vswhere" -latest -products '*' -find "$pattern" | tr -d '\r' | head -n 1)"
+              if [[ -n "$candidate" ]]; then dumpbin="$(cygpath -u "$candidate")"; break; fi
+            done
+            test -x "$dumpbin"
+            "$dumpbin" //exports "$ARTIFACT" | grep -F yanxu_native_module_v2
+          else
+            nm -D "$ARTIFACT" | grep -F yanxu_native_module_v2
+          fi
+      - name: 保存原生制品与锁定元数据
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: yanxu-platform-${{ matrix.target }}
+          path: |
+            ${{ matrix.artifact }}
+            言序.toml
+            api/api-v1.json
+            docs/API.md
+            LICENSE-MIT
+            LICENSE-APACHE
+          if-no-files-found: error
+
+  dependency-policy:
+    name: 依赖安全与许可
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: 安装固定版本审计工具
+        run: |
+          cargo install cargo-deny --version 0.20.2 --locked
+          cargo install cargo-audit --version 0.22.2 --locked
+      - name: 检查六目标来源、许可与公告
+        run: |
+          cargo deny check advisories licenses sources
+          cargo audit --file Cargo.lock --deny warnings --ignore RUSTSEC-2026-0192
+
+  assemble:
+    name: 汇总六目标正式包候选
+    needs: [native, dependency-policy]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: yanxu-platform-*
+          path: ${{ runner.temp }}/native
+      - name: 重建完整原生索引与可复现发布包
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp 言序.toml.in 言序.toml
+          targets=(
+            x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+            x86_64-apple-darwin aarch64-apple-darwin
+            x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+          )
+          for target in "${targets[@]}"; do
+            source_dir="$RUNNER_TEMP/native/yanxu-platform-$target/dist/$target"
+            test "$(find "$source_dir" -maxdepth 1 -type f | wc -l)" -eq 1
+            source="$(find "$source_dir" -maxdepth 1 -type f -print -quit)"
+            destination="dist/$target/$(basename "$source")"
+            mkdir -p "$(dirname "$destination")"
+            cp "$source" "$destination"
+            case "$target" in
+              *-apple-darwin) os=macos ;;
+              *-pc-windows-*) os=windows ;;
+              *-unknown-linux-*) os=linux ;;
+            esac
+            case "$target" in aarch64-*) arch=arm64 ;; x86_64-*) arch=x64 ;; esac
+            checksum="$(sha256sum "$destination" | awk '{print $1}')"
+            size="$(wc -c < "$destination" | tr -d ' ')"
+            {
+              printf '[原生.%s.%s]\n' "$os" "$arch"
+              printf '文件 = "dist/%s/%s"\n' "$target" "$(basename "$destination")"
+              printf '校验和 = "%s"\n' "$checksum"
+              printf '大小 = %s\n' "$size"
+            } >> 言序.toml
+          done
+          test "$(find dist -type f | wc -l)" -eq 6
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf yanxu-platform-0.1.0-six-targets.tar.gz \
+            src native vendor api docs examples tests dist Cargo.toml Cargo.lock \
+            deny.toml 言序.toml README.md CHANGELOG.md SECURITY.md LICENSE-MIT LICENSE-APACHE
+          sha256sum yanxu-platform-0.1.0-six-targets.tar.gz \
+            > yanxu-platform-0.1.0-six-targets.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: yanxu-platform-six-targets
+          path: |
+            yanxu-platform-0.1.0-six-targets.tar.gz
+            yanxu-platform-0.1.0-six-targets.sha256
+            言序.toml
+          if-no-files-found: error

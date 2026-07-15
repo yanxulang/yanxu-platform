@@ -1,0 +1,986 @@
+{
+  "declarations": [
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "协议查询",
+      "parameters": [],
+      "result": "典",
+      "signature": "法（）：典",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "能力查询",
+      "parameters": [],
+      "result": "典",
+      "signature": "法（）：典",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "单调时间",
+      "parameters": [],
+      "result": "数",
+      "signature": "法（）：数",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "绘制编码",
+      "parameters": [
+        {
+          "name": "命令",
+          "type": "列"
+        }
+      ],
+      "result": "字节串",
+      "signature": "法（列）：字节串",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "绘制检查",
+      "parameters": [
+        {
+          "name": "缓冲",
+          "type": "字节串"
+        }
+      ],
+      "result": "典",
+      "signature": "法（字节串）：典",
+      "static": false
+    },
+    {
+      "documentation": "",
+      "fields": [
+        {
+          "documentation": "",
+          "name": "句柄",
+          "readonly": false,
+          "static": false,
+          "type": "原生资源"
+        }
+      ],
+      "kind": "class",
+      "methods": [
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "初始化",
+          "parameters": [
+            {
+              "name": "名称",
+              "type": "文"
+            },
+            {
+              "name": "事件回调",
+              "type": "任意"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（文，任意）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "窗口",
+          "parameters": [
+            {
+              "name": "配置",
+              "type": "典"
+            }
+          ],
+          "result": "窗口",
+          "signature": "法（典）：窗口",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "运行",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "退出",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "唤醒",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "冲刷事件",
+          "parameters": [],
+          "result": "理",
+          "signature": "法（）：理",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "关闭",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "调试快照",
+          "parameters": [],
+          "result": "典",
+          "signature": "法（）：典",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "计时器",
+          "parameters": [
+            {
+              "name": "毫秒",
+              "type": "数"
+            },
+            {
+              "name": "重复",
+              "type": "理"
+            }
+          ],
+          "result": "计时器",
+          "signature": "法（数，理）：计时器",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "字体族",
+          "parameters": [],
+          "result": "列<文>",
+          "signature": "法（）：列<文>",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "匹配字体",
+          "parameters": [
+            {
+              "name": "配置",
+              "type": "典"
+            }
+          ],
+          "result": "典|空",
+          "signature": "法（典）：典|空",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "加载字体",
+          "parameters": [
+            {
+              "name": "内容",
+              "type": "字节串"
+            }
+          ],
+          "result": "字体",
+          "signature": "法（字节串）：字体",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "文字整形",
+          "parameters": [
+            {
+              "name": "内容",
+              "type": "文"
+            },
+            {
+              "name": "配置",
+              "type": "典"
+            }
+          ],
+          "result": "典",
+          "signature": "法（文，典）：典",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "文字测量",
+          "parameters": [
+            {
+              "name": "内容",
+              "type": "文"
+            },
+            {
+              "name": "配置",
+              "type": "典"
+            }
+          ],
+          "result": "典",
+          "signature": "法（文，典）：典",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "文字命中",
+          "parameters": [
+            {
+              "name": "内容",
+              "type": "文"
+            },
+            {
+              "name": "配置",
+              "type": "典"
+            },
+            {
+              "name": "横坐标",
+              "type": "数"
+            },
+            {
+              "name": "纵坐标",
+              "type": "数"
+            }
+          ],
+          "result": "数",
+          "signature": "法（文，典，数，数）：数",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "加载图片",
+          "parameters": [
+            {
+              "name": "内容",
+              "type": "字节串"
+            }
+          ],
+          "result": "图片",
+          "signature": "法（字节串）：图片",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "显示器",
+          "parameters": [],
+          "result": "列<典>",
+          "signature": "法（）：列<典>",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "系统主题",
+          "parameters": [],
+          "result": "文",
+          "signature": "法（）：文",
+          "static": false
+        }
+      ],
+      "name": "应用",
+      "protocols": [],
+      "superclass": null
+    },
+    {
+      "documentation": "",
+      "fields": [
+        {
+          "documentation": "",
+          "name": "句柄",
+          "readonly": false,
+          "static": false,
+          "type": "原生资源"
+        }
+      ],
+      "kind": "class",
+      "methods": [
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "初始化",
+          "parameters": [
+            {
+              "name": "应用句柄",
+              "type": "原生资源"
+            },
+            {
+              "name": "配置",
+              "type": "典"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（原生资源，典）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "命令",
+          "parameters": [
+            {
+              "name": "名称",
+              "type": "文"
+            },
+            {
+              "name": "值",
+              "type": "任意"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（文，任意）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "查询",
+          "parameters": [],
+          "result": "典",
+          "signature": "法（）：典",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "编号",
+          "parameters": [],
+          "result": "数",
+          "signature": "法（）：数",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "标题",
+          "parameters": [
+            {
+              "name": "内容",
+              "type": "文"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（文）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "大小",
+          "parameters": [
+            {
+              "name": "宽",
+              "type": "数"
+            },
+            {
+              "name": "高",
+              "type": "数"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（数，数）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "最小尺寸",
+          "parameters": [
+            {
+              "name": "宽",
+              "type": "数"
+            },
+            {
+              "name": "高",
+              "type": "数"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（数，数）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "最大尺寸",
+          "parameters": [
+            {
+              "name": "宽",
+              "type": "数"
+            },
+            {
+              "name": "高",
+              "type": "数"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（数，数）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "位置",
+          "parameters": [
+            {
+              "name": "横坐标",
+              "type": "数"
+            },
+            {
+              "name": "纵坐标",
+              "type": "数"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（数，数）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "显示",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "隐藏",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "最大化",
+          "parameters": [
+            {
+              "name": "状态",
+              "type": "理"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（理）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "最小化",
+          "parameters": [
+            {
+              "name": "状态",
+              "type": "理"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（理）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "全屏",
+          "parameters": [
+            {
+              "name": "状态",
+              "type": "理"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（理）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "无边框",
+          "parameters": [
+            {
+              "name": "状态",
+              "type": "理"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（理）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "透明",
+          "parameters": [
+            {
+              "name": "状态",
+              "type": "理"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（理）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "置顶",
+          "parameters": [
+            {
+              "name": "状态",
+              "type": "理"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（理）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "请求重绘",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "提交缓冲",
+          "parameters": [
+            {
+              "name": "缓冲",
+              "type": "字节串"
+            }
+          ],
+          "result": "数",
+          "signature": "法（字节串）：数",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "提交帧",
+          "parameters": [
+            {
+              "name": "命令",
+              "type": "列"
+            }
+          ],
+          "result": "数",
+          "signature": "法（列）：数",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "配置输入法",
+          "parameters": [
+            {
+              "name": "启用",
+              "type": "理"
+            },
+            {
+              "name": "光标区域",
+              "type": "列"
+            },
+            {
+              "name": "输入用途",
+              "type": "文"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（理，列，文）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "停止输入法",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "光标",
+          "parameters": [
+            {
+              "name": "名称",
+              "type": "文"
+            },
+            {
+              "name": "显示",
+              "type": "理"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（文，理）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "关闭",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        }
+      ],
+      "name": "窗口",
+      "protocols": [],
+      "superclass": null
+    },
+    {
+      "documentation": "",
+      "fields": [
+        {
+          "documentation": "",
+          "name": "句柄",
+          "readonly": false,
+          "static": false,
+          "type": "原生资源"
+        }
+      ],
+      "kind": "class",
+      "methods": [
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "初始化",
+          "parameters": [
+            {
+              "name": "句柄",
+              "type": "原生资源"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（原生资源）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "查询",
+          "parameters": [],
+          "result": "典",
+          "signature": "法（）：典",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "编号",
+          "parameters": [],
+          "result": "数",
+          "signature": "法（）：数",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "取消",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "关闭",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        }
+      ],
+      "name": "计时器",
+      "protocols": [],
+      "superclass": null
+    },
+    {
+      "documentation": "",
+      "fields": [
+        {
+          "documentation": "",
+          "name": "句柄",
+          "readonly": false,
+          "static": false,
+          "type": "原生资源"
+        }
+      ],
+      "kind": "class",
+      "methods": [
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "初始化",
+          "parameters": [
+            {
+              "name": "句柄",
+              "type": "原生资源"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（原生资源）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "查询",
+          "parameters": [],
+          "result": "典",
+          "signature": "法（）：典",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "关闭",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        }
+      ],
+      "name": "图片",
+      "protocols": [],
+      "superclass": null
+    },
+    {
+      "documentation": "",
+      "fields": [
+        {
+          "documentation": "",
+          "name": "句柄",
+          "readonly": false,
+          "static": false,
+          "type": "原生资源"
+        }
+      ],
+      "kind": "class",
+      "methods": [
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "初始化",
+          "parameters": [
+            {
+              "name": "句柄",
+              "type": "原生资源"
+            }
+          ],
+          "result": "任意",
+          "signature": "法（原生资源）：任意",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "关闭",
+          "parameters": [],
+          "result": "任意",
+          "signature": "法（）：任意",
+          "static": false
+        }
+      ],
+      "name": "字体",
+      "protocols": [],
+      "superclass": null
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "剪贴板读取",
+      "parameters": [],
+      "result": "文|空",
+      "signature": "法（）：文|空",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "剪贴板写入",
+      "parameters": [
+        {
+          "name": "内容",
+          "type": "文"
+        }
+      ],
+      "result": "任意",
+      "signature": "法（文）：任意",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "打开文件",
+      "parameters": [
+        {
+          "name": "配置",
+          "type": "典"
+        }
+      ],
+      "result": "文|空",
+      "signature": "法（典）：文|空",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "打开多个文件",
+      "parameters": [
+        {
+          "name": "配置",
+          "type": "典"
+        }
+      ],
+      "result": "列<文>|空",
+      "signature": "法（典）：列<文>|空",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "保存文件",
+      "parameters": [
+        {
+          "name": "配置",
+          "type": "典"
+        }
+      ],
+      "result": "文|空",
+      "signature": "法（典）：文|空",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "选择目录",
+      "parameters": [
+        {
+          "name": "配置",
+          "type": "典"
+        }
+      ],
+      "result": "文|空",
+      "signature": "法（典）：文|空",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "选择多个目录",
+      "parameters": [
+        {
+          "name": "配置",
+          "type": "典"
+        }
+      ],
+      "result": "列<文>|空",
+      "signature": "法（典）：列<文>|空",
+      "static": false
+    }
+  ],
+  "format_version": 1,
+  "language": "yanxu",
+  "module": "主"
+}
