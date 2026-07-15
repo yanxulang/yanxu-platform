@@ -6,6 +6,7 @@ use crate::data::Data;
 use crate::event::{EventKind, PlatformEvent};
 use crate::model::{Model, ResourceKind, ResourceState, WindowState};
 use crate::protocol;
+use crate::text::{TextError, TextLayout, TextOptions, TextService};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +15,7 @@ use std::time::Instant;
 
 const TYPE_APPLICATION: &[u8] = b"yanxu.platform.application";
 const TYPE_WINDOW: &[u8] = b"yanxu.platform.window";
+const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 
 #[derive(Clone, Copy)]
 pub struct HostApi(pub NativeHost);
@@ -80,6 +82,7 @@ impl HostApi {
 
 pub struct PlatformResource {
     pub model: Arc<Mutex<Model>>,
+    pub text: Arc<Mutex<TextService>>,
     pub kind: ResourceKind,
     pub id: u64,
     pub host: HostApi,
@@ -153,6 +156,12 @@ pub enum Operation {
     MonotonicTime,
     Close,
     DebugSnapshot,
+    FontFamilies,
+    FontMatch,
+    FontLoad,
+    TextShape,
+    TextMeasure,
+    TextHitTest,
 }
 
 impl Operation {
@@ -171,6 +180,12 @@ impl Operation {
             10 => Self::MonotonicTime,
             11 => Self::Close,
             12 => Self::DebugSnapshot,
+            13 => Self::FontFamilies,
+            14 => Self::FontMatch,
+            15 => Self::FontLoad,
+            16 => Self::TextShape,
+            17 => Self::TextMeasure,
+            18 => Self::TextHitTest,
             _ => return None,
         })
     }
@@ -207,6 +222,7 @@ pub unsafe fn call(
             let callback = callback(&arguments[1])?;
             host.retain(callback)?;
             let model = Arc::new(Mutex::new(Model::default()));
+            let text_service = Arc::new(Mutex::new(TextService::new()));
             let id = match model.lock().expect("platform model poisoned").create(
                 None,
                 ResourceState::Application {
@@ -232,6 +248,7 @@ pub unsafe fn call(
                 .map_err(|_| "PLATFORM_QUEUE_FULL")?;
             Ok(resource_output(
                 model,
+                text_service,
                 ResourceKind::Application,
                 id,
                 host,
@@ -272,6 +289,7 @@ pub unsafe fn call(
             drop(model);
             Ok(resource_output(
                 application.model.clone(),
+                application.text.clone(),
                 ResourceKind::Window,
                 id,
                 host,
@@ -393,6 +411,139 @@ pub unsafe fn call(
                 ("待处理事件", Data::Integer(model.events.len() as i64)),
                 ("运行中", Data::Bool(model.running)),
             ])))
+        }
+        Operation::FontFamilies => {
+            require_count(arguments, 1)?;
+            let (_, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let families = application
+                .text
+                .lock()
+                .expect("platform text service poisoned")
+                .families()
+                .into_iter()
+                .map(Data::String)
+                .collect();
+            Ok(Output::Value(Data::Array(families)))
+        }
+        Operation::FontMatch => {
+            require_count(arguments, 2)?;
+            let (_, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let config = map(&arguments[1])?;
+            let family = config.get("字族").map(text).transpose()?.unwrap_or("");
+            let weight = config
+                .get("字重")
+                .map(integer)
+                .transpose()?
+                .unwrap_or(400)
+                .clamp(1, 1_000) as u16;
+            let italic = config
+                .get("斜体")
+                .map(boolean)
+                .transpose()?
+                .unwrap_or(false);
+            let matched = application
+                .text
+                .lock()
+                .expect("platform text service poisoned")
+                .match_font(family, weight, italic);
+            Ok(Output::Value(matched.map_or(Data::Nil, |font| {
+                Data::map([
+                    ("字族", Data::String(font.family)),
+                    ("PostScript名称", Data::String(font.postscript_name)),
+                    ("字重", Data::Integer(i64::from(font.weight))),
+                    ("斜体", Data::Bool(font.italic)),
+                    ("等宽", Data::Bool(font.monospaced)),
+                ])
+            })))
+        }
+        Operation::FontLoad => {
+            require_count(arguments, 2)?;
+            let (parent_handle, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let font_bytes = bytes(&arguments[1])?.to_vec();
+            let families = application
+                .text
+                .lock()
+                .expect("platform text service poisoned")
+                .load_font(font_bytes.clone())
+                .map_err(text_error_code)?;
+            let family = families.first().cloned().ok_or("PLATFORM_FONT_INVALID")?;
+            let id = application
+                .model
+                .lock()
+                .expect("platform model poisoned")
+                .create(
+                    Some(application.id),
+                    ResourceState::Font {
+                        family,
+                        bytes: Some(font_bytes),
+                    },
+                )
+                .map_err(|_| "PLATFORM_RESOURCE_LIMIT")?;
+            Ok(resource_output(
+                application.model.clone(),
+                application.text.clone(),
+                ResourceKind::Font,
+                id,
+                host,
+                Vec::new(),
+                TYPE_FONT,
+                parent_handle,
+            ))
+        }
+        Operation::TextShape => {
+            require_count(arguments, 3)?;
+            let (_, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let content = text(&arguments[1])?;
+            let options = text_options(map(&arguments[2])?)?;
+            let layout = application
+                .text
+                .lock()
+                .expect("platform text service poisoned")
+                .shape(content, &options)
+                .map_err(text_error_code)?;
+            Ok(Output::Value(layout_data(&layout)))
+        }
+        Operation::TextMeasure => {
+            require_count(arguments, 3)?;
+            let (_, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let content = text(&arguments[1])?;
+            let options = text_options(map(&arguments[2])?)?;
+            let layout = application
+                .text
+                .lock()
+                .expect("platform text service poisoned")
+                .shape(content, &options)
+                .map_err(text_error_code)?;
+            Ok(Output::Value(Data::map([
+                ("宽", Data::Number(f64::from(layout.width))),
+                ("高", Data::Number(f64::from(layout.height))),
+                ("基线", Data::Number(f64::from(layout.baseline))),
+                ("行高", Data::Number(f64::from(options.line_height))),
+                ("行数", Data::Integer(layout.lines.len() as i64)),
+            ])))
+        }
+        Operation::TextHitTest => {
+            require_count(arguments, 5)?;
+            let (_, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let content = text(&arguments[1])?;
+            let options = text_options(map(&arguments[2])?)?;
+            let x = number(&arguments[3])? as f32;
+            let y = number(&arguments[4])? as f32;
+            let layout = application
+                .text
+                .lock()
+                .expect("platform text service poisoned")
+                .shape(content, &options)
+                .map_err(text_error_code)?;
+            Ok(Output::Value(Data::Integer(
+                layout.hit_test(x, y, content.len()) as i64,
+            )))
         }
     }
 }
@@ -572,8 +723,10 @@ fn window_snapshot(resource: &PlatformResource) -> Result<Data, &'static str> {
     ]))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resource_output(
     model: Arc<Mutex<Model>>,
+    text: Arc<Mutex<TextService>>,
     kind: ResourceKind,
     id: u64,
     host: HostApi,
@@ -584,6 +737,7 @@ fn resource_output(
     Output::Resource(ResourceOutput {
         resource: Box::new(PlatformResource {
             model,
+            text,
             kind,
             id,
             host,
@@ -683,6 +837,14 @@ fn number(value: &Data) -> Result<f64, &'static str> {
         .ok_or("PLATFORM_VALUE_TYPE")
 }
 
+fn integer(value: &Data) -> Result<i64, &'static str> {
+    if let Data::Integer(value) = value {
+        Ok(*value)
+    } else {
+        Err("PLATFORM_VALUE_TYPE")
+    }
+}
+
 fn positive_number(value: &Data) -> Result<f64, &'static str> {
     let number = number(value)?;
     if number > 0.0 && number <= 1_000_000.0 {
@@ -718,6 +880,79 @@ fn draw_error_code(error: protocol::ProtocolError) -> &'static str {
         protocol::ProtocolError::Utf8 => "PLATFORM_DRAW_UTF8",
         protocol::ProtocolError::NonFinite => "PLATFORM_DRAW_NUMBER",
         _ => "PLATFORM_DRAW_CORRUPT",
+    }
+}
+
+fn text_options(config: &BTreeMap<String, Data>) -> Result<TextOptions, &'static str> {
+    let mut options = TextOptions::default();
+    if let Some(value) = config.get("字族") {
+        options.family = Some(text(value)?.to_owned());
+    }
+    if let Some(value) = config.get("字号") {
+        options.font_size = number(value)? as f32;
+    }
+    if let Some(value) = config.get("行高") {
+        options.line_height = number(value)? as f32;
+    }
+    if let Some(value) = config.get("最大宽") {
+        options.max_width = match value {
+            Data::Nil => None,
+            _ => Some(number(value)? as f32),
+        };
+    }
+    if let Some(value) = config.get("换行") {
+        options.wrap = boolean(value)?;
+    }
+    Ok(options)
+}
+
+fn layout_data(layout: &TextLayout) -> Data {
+    let glyphs = layout
+        .glyphs
+        .iter()
+        .map(|glyph| {
+            Data::map([
+                ("字体", Data::String(glyph.font.clone())),
+                ("字形", Data::Integer(i64::from(glyph.glyph_id))),
+                ("原文起", Data::Integer(glyph.source_start as i64)),
+                ("原文终", Data::Integer(glyph.source_end as i64)),
+                ("横坐标", Data::Number(f64::from(glyph.x))),
+                ("基线", Data::Number(f64::from(glyph.baseline))),
+                ("宽", Data::Number(f64::from(glyph.width))),
+                ("从右至左", Data::Bool(glyph.rtl)),
+            ])
+        })
+        .collect();
+    let lines = layout
+        .lines
+        .iter()
+        .map(|line| {
+            Data::map([
+                ("原文行", Data::Integer(line.source_line as i64)),
+                ("顶部", Data::Number(f64::from(line.top))),
+                ("基线", Data::Number(f64::from(line.baseline))),
+                ("行高", Data::Number(f64::from(line.height))),
+                ("宽", Data::Number(f64::from(line.width))),
+                ("从右至左", Data::Bool(line.rtl)),
+                ("字形起", Data::Integer(line.glyph_start as i64)),
+                ("字形终", Data::Integer(line.glyph_end as i64)),
+            ])
+        })
+        .collect();
+    Data::map([
+        ("宽", Data::Number(f64::from(layout.width))),
+        ("高", Data::Number(f64::from(layout.height))),
+        ("基线", Data::Number(f64::from(layout.baseline))),
+        ("字形", Data::Array(glyphs)),
+        ("行", Data::Array(lines)),
+    ])
+}
+
+const fn text_error_code(error: TextError) -> &'static str {
+    match error {
+        TextError::Limit(_) => "PLATFORM_TEXT_LIMIT",
+        TextError::Options => "PLATFORM_TEXT_OPTIONS",
+        TextError::Font => "PLATFORM_FONT_INVALID",
     }
 }
 

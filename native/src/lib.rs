@@ -11,6 +11,7 @@ pub mod event;
 pub mod model;
 pub mod protocol;
 pub mod render;
+pub mod text;
 
 use abi::{NativeError, NativeFunction, NativeModule, NativeResource, Value, ValueData};
 use backend::{HostApi, Operation, Output};
@@ -45,6 +46,12 @@ static FUNCTIONS: &[(&[u8], Operation)] = &[
     ("单调时间".as_bytes(), Operation::MonotonicTime),
     ("关闭".as_bytes(), Operation::Close),
     ("调试快照".as_bytes(), Operation::DebugSnapshot),
+    ("字体枚举".as_bytes(), Operation::FontFamilies),
+    ("字体匹配".as_bytes(), Operation::FontMatch),
+    ("字体加载".as_bytes(), Operation::FontLoad),
+    ("文字整形".as_bytes(), Operation::TextShape),
+    ("文字测量".as_bytes(), Operation::TextMeasure),
+    ("文字命中".as_bytes(), Operation::TextHitTest),
 ];
 
 #[unsafe(no_mangle)]
