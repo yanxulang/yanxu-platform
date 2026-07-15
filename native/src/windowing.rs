@@ -574,11 +574,12 @@ impl Runner {
                         .with("纵坐标", logical.y),
                 );
             }
-            WindowEvent::CloseRequested => self.push(PlatformEvent::new(
-                EventKind::WindowCloseRequested,
-                Some(model_id),
-                monotonic_seconds(),
-            )),
+            WindowEvent::CloseRequested => {
+                let last_window = self.windows.len() == 1;
+                for event in close_request_events(model_id, last_window, monotonic_seconds()) {
+                    self.push(event);
+                }
+            }
             WindowEvent::Destroyed => {
                 let _ = self
                     .model
@@ -914,6 +915,22 @@ fn ime_event(model_id: u64, ime: Ime, time_seconds: f64) -> PlatformEvent {
     }
 }
 
+fn close_request_events(model_id: u64, last_window: bool, time_seconds: f64) -> Vec<PlatformEvent> {
+    let mut events = vec![PlatformEvent::new(
+        EventKind::WindowCloseRequested,
+        Some(model_id),
+        time_seconds,
+    )];
+    if last_window {
+        events.push(PlatformEvent::new(
+            EventKind::ExitRequested,
+            None,
+            time_seconds,
+        ));
+    }
+    events
+}
+
 impl ApplicationHandler for Runner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.refresh_environment(event_loop);
@@ -1235,5 +1252,19 @@ mod tests {
 
         let cancelled = ime_event(9, Ime::Disabled, 4.0);
         assert_eq!(cancelled.kind, EventKind::ImeCancelled);
+    }
+
+    #[test]
+    fn last_window_close_also_requests_application_exit() {
+        let last = close_request_events(7, true, 1.0);
+        assert_eq!(last.len(), 2);
+        assert_eq!(last[0].kind, EventKind::WindowCloseRequested);
+        assert_eq!(last[0].window, Some(7));
+        assert_eq!(last[1].kind, EventKind::ExitRequested);
+        assert_eq!(last[1].window, None);
+
+        let one_of_many = close_request_events(7, false, 1.0);
+        assert_eq!(one_of_many.len(), 1);
+        assert_eq!(one_of_many[0].kind, EventKind::WindowCloseRequested);
     }
 }
