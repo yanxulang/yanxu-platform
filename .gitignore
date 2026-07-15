@@ -1,0 +1,5 @@
+/target/
+/dist/
+/言序.toml
+.DS_Store
+*.tmp
