@@ -1,5 +1,7 @@
 /target/
 /dist/
 /言序.toml
+**/.yanxu/
+/言序.lock
 .DS_Store
 *.tmp
