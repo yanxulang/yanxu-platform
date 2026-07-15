@@ -55,7 +55,8 @@ Linux 同时启用 Wayland 和 X11 回退。六个目标均由对应架构 GitHu
 
 ## 制品与校验
 
-Release 附带`yanxu-platform-0.1.0-six-targets.tar.gz`、同名`.sha256`和完整`言序.toml`。
+Release 附带`yanxu-platform-0.1.0-six-targets.tar.gz`、同名`.sha256`和完整
+`yanxu-platform-0.1.0.toml`。
 归档包含六个真实动态库、源码、协议/API 文档、测试、许可证和第三方声明。下载后运行
 `sha256sum --check yanxu-platform-0.1.0-six-targets.sha256`复核归档；清单还逐项记录每个
 动态库的 SHA-256 与字节数。
