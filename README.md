@@ -15,6 +15,28 @@
 `winit`，CPU 表面使用 `softbuffer`，二维栅格化使用 `tiny-skia`，复杂文字使用
 `cosmic-text`。依赖版本、许可证与选型理由会固定在 `docs/` 中。
 
+## 安装依赖
+
+正式发布后，在言序项目目录使用言包添加 GitHub 包：
+
+```sh
+yanbao 加 yanxulang/yanxu-platform
+yanbao 装
+```
+
+项目清单必须授予原生窗口权限；使用相应系统服务时再加入细分权限：
+
+```toml
+[权限]
+图形界面 = true
+原生扩展 = true
+剪贴板 = true
+文件对话框 = true
+```
+
+Release 包同时包含 Windows、macOS 与 Linux 的 x86-64/ARM64 原生制品。言序按当前
+OS/架构选择文件，并验证清单中的 SHA-256 与大小。
+
 ## 从源码验证
 
 所有命令从包含本仓库的多仓工作区根目录执行：
@@ -44,6 +66,12 @@ cargo test --manifest-path yanxu-platform/Cargo.toml --workspace --all-targets -
 应用.运行（）；
 ```
 
-可运行的完整代码见 [`examples/最小窗口.yx`](examples/最小窗口.yx)，生成的公共 API
-参考见 [`docs/API.md`](docs/API.md)。第三方许可和安全审计策略见
-[`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md)。
+可运行的完整代码见 [`examples/最小窗口.yx`](examples/最小窗口.yx)。主要文档：
+
+- [实际架构](docs/ARCHITECTURE.md)与[平台 API](docs/PLATFORM_API.md)
+- [事件协议](docs/EVENT_PROTOCOL.md)、[绘制协议](docs/DRAW_PROTOCOL.md)和[文字/IME](docs/TEXT_AND_IME.md)
+- [资源生命周期](docs/RESOURCE_LIFETIME.md)、[线程模型](docs/THREADING_MODEL.md)与[兼容政策](docs/COMPATIBILITY.md)
+- [后端贡献](docs/BACKEND_GUIDE.md)、[打包发布](docs/PACKAGING.md)和[生成的 API 参考](docs/API.md)
+- [第三方许可与安全审计](docs/THIRD_PARTY.md)
+
+架构决策记录位于 `docs/ADR-001` 至 `ADR-004`。
