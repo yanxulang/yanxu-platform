@@ -52,4 +52,5 @@ jobs:
             release/yanxu-platform-0.1.0-six-targets.tar.gz \
             release/yanxu-platform-0.1.0-six-targets.sha256 \
             release/言序.toml \
-            --verify-tag --title "言台 0.1.0" --generate-notes
+            --verify-tag --title "言台 0.1.0" \
+            --notes-file docs/RELEASE_NOTES_0.1.0.md
