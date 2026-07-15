@@ -45,4 +45,5 @@ cargo test --manifest-path yanxu-platform/Cargo.toml --workspace --all-targets -
 ```
 
 可运行的完整代码见 [`examples/最小窗口.yx`](examples/最小窗口.yx)，生成的公共 API
-参考见 [`docs/API.md`](docs/API.md)。
+参考见 [`docs/API.md`](docs/API.md)。第三方许可和安全审计策略见
+[`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md)。

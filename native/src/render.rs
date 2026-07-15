@@ -376,7 +376,7 @@ impl RenderEngine {
         );
         let mut buffer = buffer.borrow_with(&mut self.font_system);
         buffer.set_size(Some(max_width * scale), None);
-        buffer.set_text(text, &Attrs::new(), Shaping::Advanced);
+        buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
         buffer.shape_until_scroll(true);
         let text_color = TextColor::rgba(color[0], color[1], color[2], color[3]);
         let clip = state.clip.as_ref().map(Mask::data);

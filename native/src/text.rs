@@ -227,19 +227,16 @@ impl TextService {
             &mut self.font_system,
             Metrics::new(options.font_size, options.line_height),
         );
-        buffer.set_wrap(
-            &mut self.font_system,
-            if options.wrap {
-                Wrap::WordOrGlyph
-            } else {
-                Wrap::None
-            },
-        );
-        buffer.set_size(&mut self.font_system, options.max_width, None);
+        buffer.set_wrap(if options.wrap {
+            Wrap::WordOrGlyph
+        } else {
+            Wrap::None
+        });
+        buffer.set_size(options.max_width, None);
         let attrs = options.family.as_deref().map_or_else(Attrs::new, |family| {
             Attrs::new().family(Family::Name(family))
         });
-        buffer.set_text(&mut self.font_system, text, &attrs, Shaping::Advanced);
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, true);
 
         let line_offsets = line_offsets(text);
