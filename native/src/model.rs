@@ -31,6 +31,7 @@ pub struct WindowState {
     pub transparent: bool,
     pub always_on_top: bool,
     pub scale_factor: f64,
+    pub display: Option<DisplayState>,
     pub redraw_requested: bool,
     pub frame: Vec<u8>,
     pub ime_allowed: bool,
@@ -57,6 +58,7 @@ impl Default for WindowState {
             transparent: false,
             always_on_top: false,
             scale_factor: 1.0,
+            display: None,
             redraw_requested: true,
             frame: Vec::new(),
             ime_allowed: false,
@@ -91,7 +93,7 @@ pub enum ResourceState {
         name: String,
         exit_requested: bool,
     },
-    Window(WindowState),
+    Window(Box<WindowState>),
     Timer(TimerState),
     Image {
         width: u32,
@@ -209,6 +211,25 @@ impl Model {
         self.resources.get_mut(&id).ok_or(ModelError::Missing(id))
     }
 
+    #[must_use]
+    pub fn windows(&self) -> Vec<(u64, WindowState)> {
+        self.resources
+            .values()
+            .filter_map(|node| match &node.state {
+                ResourceState::Window(window) => Some((node.id, window.as_ref().clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn application_exit_requested(&self, id: u64) -> Option<bool> {
+        let ResourceState::Application { exit_requested, .. } = &self.get(id).ok()?.state else {
+            return None;
+        };
+        Some(*exit_requested)
+    }
+
     pub fn close(&mut self, id: u64) -> Result<Vec<u64>, ModelError> {
         if !self.resources.contains_key(&id) {
             return Err(ModelError::Missing(id));
@@ -309,10 +330,7 @@ mod tests {
         let mut model = Model::default();
         let application = app(&mut model);
         let window = model
-            .create(
-                Some(application),
-                ResourceState::Window(WindowState::default()),
-            )
+            .create(Some(application), ResourceState::Window(Box::default()))
             .unwrap();
         let timer = model
             .create(
@@ -337,15 +355,12 @@ mod tests {
     fn rejects_invalid_parent_graphs() {
         let mut model = Model::default();
         assert_eq!(
-            model.create(None, ResourceState::Window(WindowState::default())),
+            model.create(None, ResourceState::Window(Box::default()),),
             Err(ModelError::Parent(0))
         );
         let application = app(&mut model);
         let window = model
-            .create(
-                Some(application),
-                ResourceState::Window(WindowState::default()),
-            )
+            .create(Some(application), ResourceState::Window(Box::default()))
             .unwrap();
         assert_eq!(
             model.create(

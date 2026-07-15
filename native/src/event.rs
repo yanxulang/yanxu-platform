@@ -6,7 +6,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 pub const EVENT_MAJOR: i64 = 1;
-pub const EVENT_MINOR: i64 = 0;
+pub const EVENT_MINOR: i64 = 1;
 pub const DEFAULT_EVENT_CAPACITY: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,6 +32,7 @@ pub enum EventKind {
     PointerUp,
     PointerCancelled,
     Wheel,
+    Gesture,
     KeyDown,
     KeyUp,
     TextInput,
@@ -73,6 +74,7 @@ impl EventKind {
             Self::PointerUp => "指针释放",
             Self::PointerCancelled => "指针取消",
             Self::Wheel => "滚轮",
+            Self::Gesture => "手势",
             Self::KeyDown => "按键按下",
             Self::KeyUp => "按键释放",
             Self::TextInput => "文本输入",
@@ -321,6 +323,7 @@ mod tests {
             EventKind::PointerUp,
             EventKind::PointerCancelled,
             EventKind::Wheel,
+            EventKind::Gesture,
             EventKind::KeyDown,
             EventKind::KeyUp,
             EventKind::TextInput,
@@ -336,7 +339,7 @@ mod tests {
             EventKind::MonitorsChanged,
             EventKind::Timer,
         ];
-        assert_eq!(kinds.len(), 35);
+        assert_eq!(kinds.len(), 36);
         assert!(kinds.iter().all(|kind| !kind.name().is_empty()));
     }
 

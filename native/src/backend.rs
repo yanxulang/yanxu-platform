@@ -3,7 +3,7 @@
 use crate::abi::{self, NativeError, NativeHost};
 use crate::bridge::{encode_data, free_value};
 use crate::data::Data;
-use crate::event::{EventKind, PlatformEvent};
+use crate::event::{EVENT_MAJOR, EVENT_MINOR, EventKind, PlatformEvent};
 use crate::model::{Model, ResourceKind, ResourceState, TimerState, WindowState};
 use crate::protocol;
 use crate::text::{TextError, TextLayout, TextOptions, TextService};
@@ -53,7 +53,7 @@ impl HostApi {
         })
     }
 
-    fn post(self, callback: u64, event: Data) -> Result<(), &'static str> {
+    pub(crate) fn post(self, callback: u64, event: Data) -> Result<(), &'static str> {
         let function = self.0.callback_post.ok_or("PLATFORM_HOST_MISSING")?;
         let mut value = encode_data(event);
         let mut error = NativeError::default();
@@ -64,7 +64,7 @@ impl HostApi {
             .ok_or("PLATFORM_CALLBACK_POST")
     }
 
-    fn pump(self) -> Result<(), &'static str> {
+    pub(crate) fn pump(self) -> Result<(), &'static str> {
         let Some(function) = self.0.pump else {
             return Ok(());
         };
@@ -74,7 +74,13 @@ impl HostApi {
             .ok_or("PLATFORM_CALLBACK_PUMP")
     }
 
-    fn raw_resource(self, handle: u64) -> Result<*mut c_void, &'static str> {
+    pub(crate) fn wake(self) {
+        if let Some(function) = self.0.wake {
+            unsafe { function(self.0.context) };
+        }
+    }
+
+    pub(crate) fn raw_resource(self, handle: u64) -> Result<*mut c_void, &'static str> {
         let function = self.0.resource_get.ok_or("PLATFORM_HOST_MISSING")?;
         let mut raw = std::ptr::null_mut();
         if unsafe { function(self.0.context, handle, &mut raw) } != abi::OK || raw.is_null() {
@@ -109,7 +115,7 @@ impl PlatformResource {
         }
     }
 
-    fn callback(&self) -> Result<u64, &'static str> {
+    pub(crate) fn callback(&self) -> Result<u64, &'static str> {
         self.callbacks
             .first()
             .copied()
@@ -177,6 +183,10 @@ pub enum Operation {
     CursorSet,
     Displays,
     Theme,
+    ApplicationRun,
+    ApplicationExit,
+    Wake,
+    TimerQuery,
 }
 
 impl Operation {
@@ -212,6 +222,10 @@ impl Operation {
             27 => Self::CursorSet,
             28 => Self::Displays,
             29 => Self::Theme,
+            30 => Self::ApplicationRun,
+            31 => Self::ApplicationExit,
+            32 => Self::Wake,
+            33 => Self::TimerQuery,
             _ => return None,
         })
     }
@@ -292,7 +306,10 @@ pub unsafe fn call(
             apply_window_config(&mut window, config)?;
             let mut model = application.model.lock().expect("platform model poisoned");
             let id = model
-                .create(Some(application.id), ResourceState::Window(window.clone()))
+                .create(
+                    Some(application.id),
+                    ResourceState::Window(Box::new(window.clone())),
+                )
                 .map_err(|_| "PLATFORM_RESOURCE_LIMIT")?;
             if window.visible {
                 model
@@ -369,14 +386,6 @@ pub unsafe fn call(
             };
             window.frame = bytes.to_vec();
             window.redraw_requested = true;
-            model
-                .events
-                .push(PlatformEvent::new(
-                    EventKind::RedrawRequested,
-                    Some(resource.id),
-                    monotonic_seconds(),
-                ))
-                .map_err(|_| "PLATFORM_QUEUE_FULL")?;
             Ok(Output::Value(Data::Integer(count)))
         }
         Operation::InspectDraw => {
@@ -798,6 +807,66 @@ pub unsafe fn call(
                 .clone();
             Ok(Output::Value(Data::String(theme)))
         }
+        Operation::ApplicationRun => {
+            require_count(arguments, 1)?;
+            let (_, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let model = application.model.clone();
+            let callback = application.callback()?;
+            let application_id = application.id;
+            host.retain(callback)?;
+            let result = crate::windowing::run(model, host, callback, application_id);
+            host.release(callback);
+            result?;
+            Ok(Output::Value(Data::Nil))
+        }
+        Operation::ApplicationExit => {
+            require_count(arguments, 1)?;
+            let (_, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let mut model = application.model.lock().expect("platform model poisoned");
+            let node = model
+                .get_mut(application.id)
+                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+            let ResourceState::Application { exit_requested, .. } = &mut node.state else {
+                return Err("PLATFORM_RESOURCE_TYPE");
+            };
+            *exit_requested = true;
+            drop(model);
+            let _ = crate::windowing::wake(host.0.event_loop_id);
+            host.wake();
+            Ok(Output::Value(Data::Nil))
+        }
+        Operation::Wake => {
+            require_count(arguments, 1)?;
+            let _ = unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let _ = crate::windowing::wake(host.0.event_loop_id);
+            host.wake();
+            Ok(Output::Value(Data::Nil))
+        }
+        Operation::TimerQuery => {
+            require_count(arguments, 1)?;
+            let (_, timer_resource) = unsafe { resource(arguments, 0, host, ResourceKind::Timer) }?;
+            let model = timer_resource
+                .model
+                .lock()
+                .expect("platform model poisoned");
+            let node = model
+                .get(timer_resource.id)
+                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+            let ResourceState::Timer(timer) = &node.state else {
+                return Err("PLATFORM_RESOURCE_TYPE");
+            };
+            Ok(Output::Value(Data::map([
+                ("编号", Data::Integer(timer_resource.id as i64)),
+                (
+                    "间隔毫秒",
+                    Data::Number(timer.interval.as_secs_f64() * 1_000.0),
+                ),
+                ("重复", Data::Bool(timer.repeating)),
+                ("已取消", Data::Bool(timer.cancelled)),
+            ])))
+        }
     }
 }
 
@@ -805,8 +874,8 @@ fn protocol_info() -> Data {
     Data::map([
         ("平台主", Data::Integer(1)),
         ("平台次", Data::Integer(0)),
-        ("事件主", Data::Integer(1)),
-        ("事件次", Data::Integer(0)),
+        ("事件主", Data::Integer(EVENT_MAJOR)),
+        ("事件次", Data::Integer(EVENT_MINOR)),
         ("绘制主", Data::Integer(i64::from(protocol::DRAW_MAJOR))),
         ("绘制次", Data::Integer(i64::from(protocol::DRAW_MINOR))),
         ("ABI", Data::Integer(2)),
@@ -876,6 +945,7 @@ fn window_command(
     value: &Data,
 ) -> Result<(), &'static str> {
     let mut model = resource.model.lock().expect("platform model poisoned");
+    let running = model.running;
     let node = model
         .get_mut(resource.id)
         .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
@@ -942,7 +1012,12 @@ fn window_command(
         }
         _ => return Err("PLATFORM_WINDOW_COMMAND"),
     }
-    if let Some(event) = event {
+    let event_without_native_equivalent = event.as_ref().is_some_and(|event| {
+        matches!(event.kind, EventKind::WindowShown | EventKind::WindowHidden)
+    });
+    if (!running || event_without_native_equivalent)
+        && let Some(event) = event
+    {
         model
             .events
             .push(event)
@@ -972,8 +1047,40 @@ fn window_snapshot(resource: &PlatformResource) -> Result<Data, &'static str> {
         ("透明", Data::Bool(window.transparent)),
         ("置顶", Data::Bool(window.always_on_top)),
         ("比例因子", Data::Number(window.scale_factor)),
+        (
+            "显示器",
+            window.display.as_ref().map_or(Data::Nil, display_data),
+        ),
         ("已有帧", Data::Bool(!window.frame.is_empty())),
     ]))
+}
+
+fn display_data(display: &crate::model::DisplayState) -> Data {
+    Data::map([
+        ("名称", display.name.clone().map_or(Data::Nil, Data::String)),
+        (
+            "位置",
+            Data::Array(
+                display
+                    .position
+                    .into_iter()
+                    .map(|value| Data::Integer(i64::from(value)))
+                    .collect(),
+            ),
+        ),
+        (
+            "尺寸",
+            Data::Array(
+                display
+                    .size
+                    .into_iter()
+                    .map(|value| Data::Integer(i64::from(value)))
+                    .collect(),
+            ),
+        ),
+        ("比例因子", Data::Number(display.scale_factor)),
+        ("主显示器", Data::Bool(display.primary)),
+    ])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1296,7 +1403,7 @@ const fn text_error_code(error: TextError) -> &'static str {
     }
 }
 
-fn monotonic_seconds() -> f64 {
+pub(crate) fn monotonic_seconds() -> f64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_secs_f64()
 }
@@ -1389,6 +1496,10 @@ mod tests {
     #[test]
     fn protocol_and_capability_maps_are_versioned() {
         assert_eq!(protocol_info().as_map().unwrap()["ABI"], Data::Integer(2));
+        assert_eq!(
+            protocol_info().as_map().unwrap()["事件次"],
+            Data::Integer(EVENT_MINOR)
+        );
         assert_eq!(
             capabilities().as_map().unwrap()["原生窗口"],
             Data::Bool(true)

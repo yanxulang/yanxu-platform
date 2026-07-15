@@ -12,6 +12,7 @@ pub mod model;
 pub mod protocol;
 pub mod render;
 pub mod text;
+pub mod windowing;
 
 use abi::{NativeError, NativeFunction, NativeModule, NativeResource, Value, ValueData};
 use backend::{HostApi, Operation, Output};
@@ -63,6 +64,10 @@ static FUNCTIONS: &[(&[u8], Operation)] = &[
     ("光标设置".as_bytes(), Operation::CursorSet),
     ("显示器查询".as_bytes(), Operation::Displays),
     ("主题查询".as_bytes(), Operation::Theme),
+    ("应用运行".as_bytes(), Operation::ApplicationRun),
+    ("应用退出".as_bytes(), Operation::ApplicationExit),
+    ("事件唤醒".as_bytes(), Operation::Wake),
+    ("计时器查询".as_bytes(), Operation::TimerQuery),
 ];
 
 #[unsafe(no_mangle)]
