@@ -10,6 +10,7 @@ pub mod data;
 pub mod event;
 pub mod model;
 pub mod protocol;
+pub mod render;
 
 use abi::{NativeError, NativeFunction, NativeModule, NativeResource, Value, ValueData};
 use backend::{HostApi, Operation, Output};
