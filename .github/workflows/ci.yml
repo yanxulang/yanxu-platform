@@ -38,6 +38,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: 核对 Git 包的六目标正式制品
+        shell: bash
+        run: sh scripts/verify-release-source.sh
       - name: 安装 Linux 图形开发库
         if: runner.os == 'Linux'
         shell: bash
@@ -185,6 +188,8 @@ jobs:
             source="$(find "$source_dir" -maxdepth 1 -type f -print -quit)"
             destination="dist/$target/$(basename "$source")"
             mkdir -p "$(dirname "$destination")"
+            test -f "$destination"
+            cmp "$destination" "$source"
             cp "$source" "$destination"
             case "$target" in
               *-apple-darwin) os=macos ;;
