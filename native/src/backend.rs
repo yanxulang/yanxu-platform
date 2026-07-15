@@ -187,6 +187,7 @@ pub enum Operation {
     ApplicationExit,
     Wake,
     TimerQuery,
+    DrawEncode,
 }
 
 impl Operation {
@@ -226,6 +227,7 @@ impl Operation {
             31 => Self::ApplicationExit,
             32 => Self::Wake,
             33 => Self::TimerQuery,
+            34 => Self::DrawEncode,
             _ => return None,
         })
     }
@@ -866,6 +868,12 @@ pub unsafe fn call(
                 ("重复", Data::Bool(timer.repeating)),
                 ("已取消", Data::Bool(timer.cancelled)),
             ])))
+        }
+        Operation::DrawEncode => {
+            require_count(arguments, 1)?;
+            Ok(Output::Value(Data::Bytes(crate::draw::encode_commands(
+                &arguments[0],
+            )?)))
         }
     }
 }

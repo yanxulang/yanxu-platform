@@ -7,6 +7,7 @@ pub mod abi;
 pub mod backend;
 pub mod bridge;
 pub mod data;
+pub mod draw;
 pub mod event;
 pub mod model;
 pub mod protocol;
@@ -68,6 +69,7 @@ static FUNCTIONS: &[(&[u8], Operation)] = &[
     ("应用退出".as_bytes(), Operation::ApplicationExit),
     ("事件唤醒".as_bytes(), Operation::Wake),
     ("计时器查询".as_bytes(), Operation::TimerQuery),
+    ("绘制编码".as_bytes(), Operation::DrawEncode),
 ];
 
 #[unsafe(no_mangle)]
