@@ -52,6 +52,17 @@ static FUNCTIONS: &[(&[u8], Operation)] = &[
     ("文字整形".as_bytes(), Operation::TextShape),
     ("文字测量".as_bytes(), Operation::TextMeasure),
     ("文字命中".as_bytes(), Operation::TextHitTest),
+    ("计时器创建".as_bytes(), Operation::TimerCreate),
+    ("计时器取消".as_bytes(), Operation::TimerCancel),
+    ("剪贴板读取".as_bytes(), Operation::ClipboardRead),
+    ("剪贴板写入".as_bytes(), Operation::ClipboardWrite),
+    ("文件对话框".as_bytes(), Operation::FileDialog),
+    ("图片加载".as_bytes(), Operation::ImageLoad),
+    ("图片查询".as_bytes(), Operation::ImageInfo),
+    ("输入法配置".as_bytes(), Operation::ImeConfigure),
+    ("光标设置".as_bytes(), Operation::CursorSet),
+    ("显示器查询".as_bytes(), Operation::Displays),
+    ("主题查询".as_bytes(), Operation::Theme),
 ];
 
 #[unsafe(no_mangle)]

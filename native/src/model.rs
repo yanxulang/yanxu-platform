@@ -4,6 +4,7 @@ use crate::event::EventBatcher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
@@ -32,6 +33,11 @@ pub struct WindowState {
     pub scale_factor: f64,
     pub redraw_requested: bool,
     pub frame: Vec<u8>,
+    pub ime_allowed: bool,
+    pub ime_cursor_area: Option<[f64; 4]>,
+    pub ime_purpose: String,
+    pub cursor: String,
+    pub cursor_visible: bool,
 }
 
 impl Default for WindowState {
@@ -53,8 +59,30 @@ impl Default for WindowState {
             scale_factor: 1.0,
             redraw_requested: true,
             frame: Vec::new(),
+            ime_allowed: false,
+            ime_cursor_area: None,
+            ime_purpose: "普通".to_owned(),
+            cursor: "默认".to_owned(),
+            cursor_visible: true,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimerState {
+    pub interval: Duration,
+    pub repeating: bool,
+    pub next_deadline: Instant,
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayState {
+    pub name: Option<String>,
+    pub position: [i32; 2],
+    pub size: [u32; 2],
+    pub scale_factor: f64,
+    pub primary: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,10 +92,7 @@ pub enum ResourceState {
         exit_requested: bool,
     },
     Window(WindowState),
-    Timer {
-        interval_millis: u64,
-        repeating: bool,
-    },
+    Timer(TimerState),
     Image {
         width: u32,
         height: u32,
@@ -85,7 +110,7 @@ impl ResourceState {
         match self {
             Self::Application { .. } => ResourceKind::Application,
             Self::Window(_) => ResourceKind::Window,
-            Self::Timer { .. } => ResourceKind::Timer,
+            Self::Timer(_) => ResourceKind::Timer,
             Self::Image { .. } => ResourceKind::Image,
             Self::Font { .. } => ResourceKind::Font,
         }
@@ -125,6 +150,8 @@ pub struct Model {
     resources: BTreeMap<u64, ResourceNode>,
     pub events: EventBatcher,
     pub running: bool,
+    pub displays: Vec<DisplayState>,
+    pub system_theme: String,
 }
 
 impl Default for Model {
@@ -134,6 +161,8 @@ impl Default for Model {
             resources: BTreeMap::new(),
             events: EventBatcher::default(),
             running: false,
+            displays: Vec::new(),
+            system_theme: "系统".to_owned(),
         }
     }
 }
@@ -205,6 +234,40 @@ impl Model {
             .count()
     }
 
+    pub fn due_timers(&mut self, now: Instant) -> Vec<u64> {
+        let mut due = Vec::new();
+        for node in self.resources.values_mut() {
+            let ResourceState::Timer(timer) = &mut node.state else {
+                continue;
+            };
+            if timer.cancelled || timer.next_deadline > now {
+                continue;
+            }
+            due.push(node.id);
+            if timer.repeating {
+                while timer.next_deadline <= now {
+                    timer.next_deadline += timer.interval;
+                }
+            } else {
+                timer.cancelled = true;
+            }
+        }
+        due
+    }
+
+    #[must_use]
+    pub fn next_timer_deadline(&self) -> Option<Instant> {
+        self.resources
+            .values()
+            .filter_map(|node| {
+                let ResourceState::Timer(timer) = &node.state else {
+                    return None;
+                };
+                (!timer.cancelled).then_some(timer.next_deadline)
+            })
+            .min()
+    }
+
     fn collect_close_order(&self, id: u64, order: &mut Vec<u64>) {
         if let Some(node) = self.resources.get(&id) {
             for child in node.children.iter().rev() {
@@ -254,10 +317,12 @@ mod tests {
         let timer = model
             .create(
                 Some(application),
-                ResourceState::Timer {
-                    interval_millis: 50,
+                ResourceState::Timer(TimerState {
+                    interval: Duration::from_millis(50),
                     repeating: true,
-                },
+                    next_deadline: Instant::now() + Duration::from_millis(50),
+                    cancelled: false,
+                }),
             )
             .unwrap();
         assert_eq!(
@@ -285,10 +350,12 @@ mod tests {
         assert_eq!(
             model.create(
                 Some(window),
-                ResourceState::Timer {
-                    interval_millis: 10,
+                ResourceState::Timer(TimerState {
+                    interval: Duration::from_millis(10),
                     repeating: false,
-                }
+                    next_deadline: Instant::now() + Duration::from_millis(10),
+                    cancelled: false,
+                })
             ),
             Err(ModelError::Parent(window))
         );
@@ -302,6 +369,42 @@ mod tests {
         assert_eq!(
             model.close(application),
             Err(ModelError::Missing(application))
+        );
+    }
+
+    #[test]
+    fn timers_fire_once_or_reschedule_without_drift() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        let now = Instant::now();
+        let once = model
+            .create(
+                Some(application),
+                ResourceState::Timer(TimerState {
+                    interval: Duration::from_millis(10),
+                    repeating: false,
+                    next_deadline: now,
+                    cancelled: false,
+                }),
+            )
+            .unwrap();
+        let repeating = model
+            .create(
+                Some(application),
+                ResourceState::Timer(TimerState {
+                    interval: Duration::from_millis(10),
+                    repeating: true,
+                    next_deadline: now - Duration::from_millis(25),
+                    cancelled: false,
+                }),
+            )
+            .unwrap();
+        assert_eq!(model.due_timers(now), vec![once, repeating]);
+        assert!(model.due_timers(now).is_empty());
+        assert!(
+            model
+                .next_timer_deadline()
+                .is_some_and(|deadline| deadline > now)
         );
     }
 }

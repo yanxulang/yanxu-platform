@@ -4,18 +4,22 @@ use crate::abi::{self, NativeError, NativeHost};
 use crate::bridge::{encode_data, free_value};
 use crate::data::Data;
 use crate::event::{EventKind, PlatformEvent};
-use crate::model::{Model, ResourceKind, ResourceState, WindowState};
+use crate::model::{Model, ResourceKind, ResourceState, TimerState, WindowState};
 use crate::protocol;
 use crate::text::{TextError, TextLayout, TextOptions, TextService};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
+use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const TYPE_APPLICATION: &[u8] = b"yanxu.platform.application";
 const TYPE_WINDOW: &[u8] = b"yanxu.platform.window";
 const TYPE_FONT: &[u8] = b"yanxu.platform.font";
+const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
+const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
 
 #[derive(Clone, Copy)]
 pub struct HostApi(pub NativeHost);
@@ -162,6 +166,17 @@ pub enum Operation {
     TextShape,
     TextMeasure,
     TextHitTest,
+    TimerCreate,
+    TimerCancel,
+    ClipboardRead,
+    ClipboardWrite,
+    FileDialog,
+    ImageLoad,
+    ImageInfo,
+    ImeConfigure,
+    CursorSet,
+    Displays,
+    Theme,
 }
 
 impl Operation {
@@ -186,6 +201,17 @@ impl Operation {
             16 => Self::TextShape,
             17 => Self::TextMeasure,
             18 => Self::TextHitTest,
+            19 => Self::TimerCreate,
+            20 => Self::TimerCancel,
+            21 => Self::ClipboardRead,
+            22 => Self::ClipboardWrite,
+            23 => Self::FileDialog,
+            24 => Self::ImageLoad,
+            25 => Self::ImageInfo,
+            26 => Self::ImeConfigure,
+            27 => Self::CursorSet,
+            28 => Self::Displays,
+            29 => Self::Theme,
             _ => return None,
         })
     }
@@ -545,6 +571,233 @@ pub unsafe fn call(
                 layout.hit_test(x, y, content.len()) as i64,
             )))
         }
+        Operation::TimerCreate => {
+            require_count(arguments, 3)?;
+            let (parent_handle, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let millis = number(&arguments[1])?;
+            if !(10.0..=86_400_000.0).contains(&millis) {
+                return Err("PLATFORM_TIMER_RANGE");
+            }
+            let repeating = boolean(&arguments[2])?;
+            let interval = Duration::from_secs_f64(millis / 1_000.0);
+            let id = application
+                .model
+                .lock()
+                .expect("platform model poisoned")
+                .create(
+                    Some(application.id),
+                    ResourceState::Timer(TimerState {
+                        interval,
+                        repeating,
+                        next_deadline: Instant::now() + interval,
+                        cancelled: false,
+                    }),
+                )
+                .map_err(|_| "PLATFORM_RESOURCE_LIMIT")?;
+            Ok(resource_output(
+                application.model.clone(),
+                application.text.clone(),
+                ResourceKind::Timer,
+                id,
+                host,
+                Vec::new(),
+                TYPE_TIMER,
+                parent_handle,
+            ))
+        }
+        Operation::TimerCancel => {
+            require_count(arguments, 1)?;
+            let (_, timer) = unsafe { resource(arguments, 0, host, ResourceKind::Timer) }?;
+            let mut model = timer.model.lock().expect("platform model poisoned");
+            let node = model
+                .get_mut(timer.id)
+                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+            let ResourceState::Timer(timer) = &mut node.state else {
+                return Err("PLATFORM_RESOURCE_TYPE");
+            };
+            timer.cancelled = true;
+            Ok(Output::Value(Data::Nil))
+        }
+        Operation::ClipboardRead => {
+            require_count(arguments, 0)?;
+            if !host.permission("剪贴板") {
+                return Err("PLATFORM_PERMISSION_CLIPBOARD");
+            }
+            let mut clipboard = arboard::Clipboard::new().map_err(|_| "PLATFORM_CLIPBOARD")?;
+            match clipboard.get_text() {
+                Ok(value) => Ok(Output::Value(Data::String(value))),
+                Err(arboard::Error::ContentNotAvailable) => Ok(Output::Value(Data::Nil)),
+                Err(_) => Err("PLATFORM_CLIPBOARD"),
+            }
+        }
+        Operation::ClipboardWrite => {
+            require_count(arguments, 1)?;
+            if !host.permission("剪贴板") {
+                return Err("PLATFORM_PERMISSION_CLIPBOARD");
+            }
+            let value = text(&arguments[0])?.to_owned();
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.set_text(value))
+                .map_err(|_| "PLATFORM_CLIPBOARD")?;
+            Ok(Output::Value(Data::Nil))
+        }
+        Operation::FileDialog => {
+            require_count(arguments, 2)?;
+            if !host.permission("文件对话框") {
+                return Err("PLATFORM_PERMISSION_DIALOG");
+            }
+            let kind = text(&arguments[0])?;
+            let config = map(&arguments[1])?;
+            Ok(Output::Value(file_dialog(kind, config)?))
+        }
+        Operation::ImageLoad => {
+            require_count(arguments, 2)?;
+            let (parent_handle, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let (width, height, rgba) = decode_image(bytes(&arguments[1])?)?;
+            let id = application
+                .model
+                .lock()
+                .expect("platform model poisoned")
+                .create(
+                    Some(application.id),
+                    ResourceState::Image {
+                        width,
+                        height,
+                        rgba,
+                    },
+                )
+                .map_err(|_| "PLATFORM_RESOURCE_LIMIT")?;
+            Ok(resource_output(
+                application.model.clone(),
+                application.text.clone(),
+                ResourceKind::Image,
+                id,
+                host,
+                Vec::new(),
+                TYPE_IMAGE,
+                parent_handle,
+            ))
+        }
+        Operation::ImageInfo => {
+            require_count(arguments, 1)?;
+            let (_, image) = unsafe { resource(arguments, 0, host, ResourceKind::Image) }?;
+            let model = image.model.lock().expect("platform model poisoned");
+            let node = model
+                .get(image.id)
+                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+            let ResourceState::Image {
+                width,
+                height,
+                rgba,
+            } = &node.state
+            else {
+                return Err("PLATFORM_RESOURCE_TYPE");
+            };
+            Ok(Output::Value(Data::map([
+                ("宽", Data::Integer(i64::from(*width))),
+                ("高", Data::Integer(i64::from(*height))),
+                ("字节数", Data::Integer(rgba.len() as i64)),
+            ])))
+        }
+        Operation::ImeConfigure => {
+            require_count(arguments, 2)?;
+            let (_, window_resource) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Window) }?;
+            let config = map(&arguments[1])?;
+            let mut model = window_resource
+                .model
+                .lock()
+                .expect("platform model poisoned");
+            let node = model
+                .get_mut(window_resource.id)
+                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+            let ResourceState::Window(window) = &mut node.state else {
+                return Err("PLATFORM_RESOURCE_TYPE");
+            };
+            if let Some(value) = config.get("启用") {
+                window.ime_allowed = boolean(value)?;
+            }
+            if let Some(value) = config.get("光标区域") {
+                window.ime_cursor_area = Some(rectangle(value)?);
+            }
+            if let Some(value) = config.get("用途") {
+                window.ime_purpose = text(value)?.to_owned();
+            }
+            Ok(Output::Value(Data::Nil))
+        }
+        Operation::CursorSet => {
+            require_count(arguments, 3)?;
+            let (_, window_resource) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Window) }?;
+            let name = text(&arguments[1])?.to_owned();
+            let visible = boolean(&arguments[2])?;
+            let mut model = window_resource
+                .model
+                .lock()
+                .expect("platform model poisoned");
+            let node = model
+                .get_mut(window_resource.id)
+                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+            let ResourceState::Window(window) = &mut node.state else {
+                return Err("PLATFORM_RESOURCE_TYPE");
+            };
+            window.cursor = name;
+            window.cursor_visible = visible;
+            Ok(Output::Value(Data::Nil))
+        }
+        Operation::Displays => {
+            require_count(arguments, 1)?;
+            let (_, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let model = application.model.lock().expect("platform model poisoned");
+            Ok(Output::Value(Data::Array(
+                model
+                    .displays
+                    .iter()
+                    .map(|display| {
+                        Data::map([
+                            ("名称", display.name.clone().map_or(Data::Nil, Data::String)),
+                            (
+                                "位置",
+                                Data::Array(
+                                    display
+                                        .position
+                                        .into_iter()
+                                        .map(|value| Data::Integer(i64::from(value)))
+                                        .collect(),
+                                ),
+                            ),
+                            (
+                                "尺寸",
+                                Data::Array(
+                                    display
+                                        .size
+                                        .into_iter()
+                                        .map(|value| Data::Integer(i64::from(value)))
+                                        .collect(),
+                                ),
+                            ),
+                            ("比例因子", Data::Number(display.scale_factor)),
+                            ("主显示器", Data::Bool(display.primary)),
+                        ])
+                    })
+                    .collect(),
+            )))
+        }
+        Operation::Theme => {
+            require_count(arguments, 1)?;
+            let (_, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let theme = application
+                .model
+                .lock()
+                .expect("platform model poisoned")
+                .system_theme
+                .clone();
+            Ok(Output::Value(Data::String(theme)))
+        }
     }
 }
 
@@ -873,6 +1126,93 @@ fn size(value: &Data) -> Result<[f64; 2], &'static str> {
     }
 }
 
+fn rectangle(value: &Data) -> Result<[f64; 4], &'static str> {
+    let Data::Array(values) = value else {
+        return Err("PLATFORM_VALUE_TYPE");
+    };
+    if values.len() != 4 {
+        return Err("PLATFORM_VALUE_TYPE");
+    }
+    let rectangle = [
+        number(&values[0])?,
+        number(&values[1])?,
+        number(&values[2])?,
+        number(&values[3])?,
+    ];
+    if rectangle[2] < 0.0 || rectangle[3] < 0.0 {
+        return Err("PLATFORM_VALUE_RANGE");
+    }
+    Ok(rectangle)
+}
+
+fn file_dialog(kind: &str, config: &BTreeMap<String, Data>) -> Result<Data, &'static str> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(value) = config.get("标题") {
+        dialog = dialog.set_title(text(value)?);
+    }
+    if let Some(value) = config.get("目录") {
+        dialog = dialog.set_directory(PathBuf::from(text(value)?));
+    }
+    if let Some(value) = config.get("文件名") {
+        dialog = dialog.set_file_name(text(value)?);
+    }
+    if let Some(Data::Array(filters)) = config.get("过滤器") {
+        for filter in filters {
+            let filter = map(filter)?;
+            let name = filter.get("名称").map(text).transpose()?.unwrap_or("文件");
+            let extensions = filter
+                .get("扩展")
+                .map(string_array)
+                .transpose()?
+                .unwrap_or_default();
+            let extension_refs: Vec<_> = extensions.iter().map(String::as_str).collect();
+            dialog = dialog.add_filter(name, &extension_refs);
+        }
+    }
+    let path = |value: PathBuf| Data::String(value.to_string_lossy().into_owned());
+    match kind {
+        "打开文件" => Ok(dialog.pick_file().map_or(Data::Nil, path)),
+        "打开多个文件" => Ok(dialog.pick_files().map_or(Data::Nil, |paths| {
+            Data::Array(paths.into_iter().map(path).collect())
+        })),
+        "保存文件" => Ok(dialog.save_file().map_or(Data::Nil, path)),
+        "选择目录" => Ok(dialog.pick_folder().map_or(Data::Nil, path)),
+        "选择多个目录" => Ok(dialog.pick_folders().map_or(Data::Nil, |paths| {
+            Data::Array(paths.into_iter().map(path).collect())
+        })),
+        _ => Err("PLATFORM_DIALOG_KIND"),
+    }
+}
+
+fn string_array(value: &Data) -> Result<Vec<String>, &'static str> {
+    let Data::Array(values) = value else {
+        return Err("PLATFORM_VALUE_TYPE");
+    };
+    values
+        .iter()
+        .map(|value| text(value).map(str::to_owned))
+        .collect()
+}
+
+fn decode_image(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), &'static str> {
+    if bytes.is_empty() {
+        return Err("PLATFORM_IMAGE_INVALID");
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    let mut reader = image::ImageReader::new(Cursor::new(bytes));
+    reader = reader
+        .with_guessed_format()
+        .map_err(|_| "PLATFORM_IMAGE_INVALID")?;
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|_| "PLATFORM_IMAGE_INVALID")?;
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok((width, height, rgba.into_raw()))
+}
+
 fn draw_error_code(error: protocol::ProtocolError) -> &'static str {
     match error {
         protocol::ProtocolError::Major { .. } => "PLATFORM_DRAW_MAJOR",
@@ -1052,6 +1392,42 @@ mod tests {
         assert_eq!(
             capabilities().as_map().unwrap()["原生窗口"],
             Data::Bool(true)
+        );
+    }
+
+    #[test]
+    fn decodes_bounded_png_resources() {
+        let source = image::RgbaImage::from_pixel(2, 1, image::Rgba([10, 20, 30, 255]));
+        let mut encoded = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(source)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let (width, height, rgba) = decode_image(encoded.get_ref()).unwrap();
+        assert_eq!([width, height], [2, 1]);
+        assert_eq!(rgba, vec![10, 20, 30, 255, 10, 20, 30, 255]);
+        assert_eq!(decode_image(&[1, 2, 3]), Err("PLATFORM_IMAGE_INVALID"));
+    }
+
+    #[test]
+    fn validates_ime_cursor_rectangles() {
+        assert_eq!(
+            rectangle(&Data::Array(vec![
+                Data::Integer(1),
+                Data::Integer(2),
+                Data::Integer(30),
+                Data::Integer(20),
+            ]))
+            .unwrap(),
+            [1.0, 2.0, 30.0, 20.0]
+        );
+        assert_eq!(
+            rectangle(&Data::Array(vec![
+                Data::Integer(1),
+                Data::Integer(2),
+                Data::Integer(-1),
+                Data::Integer(20),
+            ])),
+            Err("PLATFORM_VALUE_RANGE")
         );
     }
 }
