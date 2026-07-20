@@ -400,19 +400,27 @@ pub unsafe fn call(
             let (_, resource) = unsafe { resource(arguments, 0, host, ResourceKind::Window) }?;
             let tree = match &arguments[1] {
                 Data::Nil => None,
-                value => Some(SemanticTree::validate(value).map_err(|error| error.code())?),
+                value => match SemanticTree::validate(value) {
+                    Ok(tree) => Some(tree),
+                    Err(error) => {
+                        resource
+                            .model
+                            .lock_recover()
+                            .record_accessibility_rejection();
+                        return Err(error.code());
+                    }
+                },
             };
             let mut model = resource.model.lock_recover();
+            let changed = model
+                .replace_accessibility(resource.id, tree)
+                .map_err(|error| error.code())?;
             let node = model
-                .get_mut(resource.id)
+                .get(resource.id)
                 .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
-            let ResourceState::Window(window) = &mut node.state else {
+            let ResourceState::Window(window) = &node.state else {
                 return Err("PLATFORM_RESOURCE_TYPE");
             };
-            let changed = window
-                .accessibility
-                .replace(tree)
-                .map_err(|error| error.code())?;
             let result = accessibility_state_data(&window.accessibility, Some(changed));
             drop(model);
             if changed {
@@ -1198,6 +1206,7 @@ fn debug_snapshot(model: &Model) -> Data {
     let events = model.events.metrics();
     let resources = model.resource_metrics();
     let frames = model.frame_metrics();
+    let accessibility = model.accessibility_metrics();
     Data::map([
         ("应用", usize_data(model.count(ResourceKind::Application))),
         ("窗口", usize_data(model.count(ResourceKind::Window))),
@@ -1240,6 +1249,25 @@ fn debug_snapshot(model: &Model) -> Data {
                 ("渲染总数", u64_data(frames.rendered)),
                 ("呈现总数", u64_data(frames.presented)),
                 ("失败总数", u64_data(frames.failed)),
+            ]),
+        ),
+        (
+            "无障碍统计",
+            Data::map([
+                ("当前树", usize_data(accessibility.current_trees)),
+                ("当前节点", usize_data(accessibility.current_nodes)),
+                ("节点高水位", usize_data(accessibility.nodes_high_watermark)),
+                ("当前文字字节", usize_data(accessibility.current_text_bytes)),
+                (
+                    "文字字节高水位",
+                    usize_data(accessibility.text_bytes_high_watermark),
+                ),
+                ("更新总数", u64_data(accessibility.updates)),
+                ("去重总数", u64_data(accessibility.unchanged)),
+                ("清除总数", u64_data(accessibility.cleared)),
+                ("焦点请求总数", u64_data(accessibility.focus_requests)),
+                ("动作请求总数", u64_data(accessibility.action_requests)),
+                ("拒绝总数", u64_data(accessibility.rejected)),
             ]),
         ),
     ])

@@ -157,6 +157,21 @@ pub struct FrameMetrics {
     pub failed: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AccessibilityMetrics {
+    pub current_trees: usize,
+    pub current_nodes: usize,
+    pub nodes_high_watermark: usize,
+    pub current_text_bytes: usize,
+    pub text_bytes_high_watermark: usize,
+    pub updates: u64,
+    pub unchanged: u64,
+    pub cleared: u64,
+    pub focus_requests: u64,
+    pub action_requests: u64,
+    pub rejected: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameSubmission {
     pub sequence: u64,
@@ -188,13 +203,13 @@ impl Display for ModelError {
 impl Error for ModelError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AccessibilityEventError {
+pub enum AccessibilityModelError {
     Model(ModelError),
     Accessibility(AccessibilityError),
     Queue(EventQueueError),
 }
 
-impl AccessibilityEventError {
+impl AccessibilityModelError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
@@ -208,7 +223,7 @@ impl AccessibilityEventError {
     }
 }
 
-impl Display for AccessibilityEventError {
+impl Display for AccessibilityModelError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Model(error) => Display::fmt(error, formatter),
@@ -218,21 +233,21 @@ impl Display for AccessibilityEventError {
     }
 }
 
-impl Error for AccessibilityEventError {}
+impl Error for AccessibilityModelError {}
 
-impl From<ModelError> for AccessibilityEventError {
+impl From<ModelError> for AccessibilityModelError {
     fn from(error: ModelError) -> Self {
         Self::Model(error)
     }
 }
 
-impl From<AccessibilityError> for AccessibilityEventError {
+impl From<AccessibilityError> for AccessibilityModelError {
     fn from(error: AccessibilityError) -> Self {
         Self::Accessibility(error)
     }
 }
 
-impl From<EventQueueError> for AccessibilityEventError {
+impl From<EventQueueError> for AccessibilityModelError {
     fn from(error: EventQueueError) -> Self {
         Self::Queue(error)
     }
@@ -244,6 +259,7 @@ pub struct Model {
     resources: BTreeMap<u64, ResourceNode>,
     resource_metrics: ResourceMetrics,
     frame_metrics: FrameMetrics,
+    accessibility_metrics: AccessibilityMetrics,
     pub events: EventBatcher,
     pub running: bool,
     pub displays: Vec<DisplayState>,
@@ -257,6 +273,7 @@ impl Default for Model {
             resources: BTreeMap::new(),
             resource_metrics: ResourceMetrics::default(),
             frame_metrics: FrameMetrics::default(),
+            accessibility_metrics: AccessibilityMetrics::default(),
             events: EventBatcher::default(),
             running: false,
             displays: Vec::new(),
@@ -359,6 +376,28 @@ impl Model {
                 })
             })
             .count();
+        let (accessibility_trees, accessibility_nodes, accessibility_text_bytes) = order
+            .iter()
+            .filter_map(|closing| {
+                let node = self.resources.get(closing)?;
+                let ResourceState::Window(window) = &node.state else {
+                    return None;
+                };
+                window.accessibility.tree().map(|_| {
+                    (
+                        1_usize,
+                        window.accessibility.node_count(),
+                        window.accessibility.text_bytes(),
+                    )
+                })
+            })
+            .fold((0_usize, 0_usize, 0_usize), |totals, values| {
+                (
+                    totals.0.saturating_add(values.0),
+                    totals.1.saturating_add(values.1),
+                    totals.2.saturating_add(values.2),
+                )
+            });
         for closing in &order {
             if let Some(node) = self.resources.remove(closing)
                 && let Some(parent) = node.parent
@@ -373,6 +412,18 @@ impl Model {
             .closed
             .saturating_add(order.len() as u64);
         self.frame_metrics.pending = self.frame_metrics.pending.saturating_sub(pending_frames);
+        self.accessibility_metrics.current_trees = self
+            .accessibility_metrics
+            .current_trees
+            .saturating_sub(accessibility_trees);
+        self.accessibility_metrics.current_nodes = self
+            .accessibility_metrics
+            .current_nodes
+            .saturating_sub(accessibility_nodes);
+        self.accessibility_metrics.current_text_bytes = self
+            .accessibility_metrics
+            .current_text_bytes
+            .saturating_sub(accessibility_text_bytes);
         Ok(order)
     }
 
@@ -459,32 +510,104 @@ impl Model {
         self.frame_metrics.failed = self.frame_metrics.failed.saturating_add(1);
     }
 
+    pub fn replace_accessibility(
+        &mut self,
+        window_id: u64,
+        tree: Option<crate::accessibility::SemanticTree>,
+    ) -> Result<bool, AccessibilityModelError> {
+        let outcome: Result<_, AccessibilityModelError> = (|| {
+            let node = self.get_mut(window_id)?;
+            let ResourceState::Window(window) = &mut node.state else {
+                return Err(AccessibilityModelError::from(ModelError::Kind(window_id)));
+            };
+            let before = (
+                usize::from(window.accessibility.tree().is_some()),
+                window.accessibility.node_count(),
+                window.accessibility.text_bytes(),
+            );
+            let changed = window.accessibility.replace(tree)?;
+            let after = (
+                usize::from(window.accessibility.tree().is_some()),
+                window.accessibility.node_count(),
+                window.accessibility.text_bytes(),
+            );
+            Ok((changed, before, after))
+        })();
+        let (changed, before, after) = match outcome {
+            Ok(value) => value,
+            Err(error) => {
+                self.record_accessibility_rejection();
+                return Err(error);
+            }
+        };
+        if changed {
+            let metrics = &mut self.accessibility_metrics;
+            metrics.current_trees = metrics
+                .current_trees
+                .saturating_sub(before.0)
+                .saturating_add(after.0);
+            metrics.current_nodes = metrics
+                .current_nodes
+                .saturating_sub(before.1)
+                .saturating_add(after.1);
+            metrics.current_text_bytes = metrics
+                .current_text_bytes
+                .saturating_sub(before.2)
+                .saturating_add(after.2);
+            metrics.nodes_high_watermark = metrics.nodes_high_watermark.max(metrics.current_nodes);
+            metrics.text_bytes_high_watermark = metrics
+                .text_bytes_high_watermark
+                .max(metrics.current_text_bytes);
+            metrics.updates = metrics.updates.saturating_add(1);
+            if before.0 == 1 && after.0 == 0 {
+                metrics.cleared = metrics.cleared.saturating_add(1);
+            }
+        } else {
+            self.accessibility_metrics.unchanged =
+                self.accessibility_metrics.unchanged.saturating_add(1);
+        }
+        Ok(changed)
+    }
+
+    pub fn record_accessibility_rejection(&mut self) {
+        self.accessibility_metrics.rejected = self.accessibility_metrics.rejected.saturating_add(1);
+    }
+
     pub fn request_accessibility_focus(
         &mut self,
         window_id: u64,
         node_id: i64,
         source: AccessibilitySource,
         time_seconds: f64,
-    ) -> Result<(), AccessibilityEventError> {
-        let revision = {
-            let node = self.get(window_id)?;
-            let ResourceState::Window(window) = &node.state else {
-                return Err(ModelError::Kind(window_id).into());
+    ) -> Result<(), AccessibilityModelError> {
+        let result: Result<(), AccessibilityModelError> = (|| {
+            let revision = {
+                let node = self.get(window_id)?;
+                let ResourceState::Window(window) = &node.state else {
+                    return Err(ModelError::Kind(window_id).into());
+                };
+                window.accessibility.focus_target(node_id)?;
+                window.accessibility.revision()
             };
-            window.accessibility.focus_target(node_id)?;
-            window.accessibility.revision()
-        };
-        self.events.push(
-            PlatformEvent::new(
-                EventKind::AccessibilityFocusRequested,
-                Some(window_id),
-                time_seconds,
-            )
-            .with("节点", Data::Integer(node_id))
-            .with("树修订", Data::Integer(revision))
-            .with("来源", source.name()),
-        )?;
-        Ok(())
+            self.events.push(
+                PlatformEvent::new(
+                    EventKind::AccessibilityFocusRequested,
+                    Some(window_id),
+                    time_seconds,
+                )
+                .with("节点", Data::Integer(node_id))
+                .with("树修订", Data::Integer(revision))
+                .with("来源", source.name()),
+            )?;
+            Ok(())
+        })();
+        if result.is_ok() {
+            self.accessibility_metrics.focus_requests =
+                self.accessibility_metrics.focus_requests.saturating_add(1);
+        } else {
+            self.record_accessibility_rejection();
+        }
+        result
     }
 
     pub fn request_accessibility_action(
@@ -495,35 +618,49 @@ impl Model {
         argument: Data,
         source: AccessibilitySource,
         time_seconds: f64,
-    ) -> Result<(), AccessibilityEventError> {
-        let revision = {
-            let node = self.get(window_id)?;
-            let ResourceState::Window(window) = &node.state else {
-                return Err(ModelError::Kind(window_id).into());
+    ) -> Result<(), AccessibilityModelError> {
+        let result: Result<(), AccessibilityModelError> = (|| {
+            let revision = {
+                let node = self.get(window_id)?;
+                let ResourceState::Window(window) = &node.state else {
+                    return Err(ModelError::Kind(window_id).into());
+                };
+                window
+                    .accessibility
+                    .action_target(node_id, action, &argument)?;
+                window.accessibility.revision()
             };
-            window
-                .accessibility
-                .action_target(node_id, action, &argument)?;
-            window.accessibility.revision()
-        };
-        self.events.push(
-            PlatformEvent::new(
-                EventKind::AccessibilityActionRequested,
-                Some(window_id),
-                time_seconds,
-            )
-            .with("节点", Data::Integer(node_id))
-            .with("树修订", Data::Integer(revision))
-            .with("动作", action)
-            .with("参数", argument)
-            .with("来源", source.name()),
-        )?;
-        Ok(())
+            self.events.push(
+                PlatformEvent::new(
+                    EventKind::AccessibilityActionRequested,
+                    Some(window_id),
+                    time_seconds,
+                )
+                .with("节点", Data::Integer(node_id))
+                .with("树修订", Data::Integer(revision))
+                .with("动作", action)
+                .with("参数", argument)
+                .with("来源", source.name()),
+            )?;
+            Ok(())
+        })();
+        if result.is_ok() {
+            self.accessibility_metrics.action_requests =
+                self.accessibility_metrics.action_requests.saturating_add(1);
+        } else {
+            self.record_accessibility_rejection();
+        }
+        result
     }
 
     #[must_use]
     pub const fn frame_metrics(&self) -> FrameMetrics {
         self.frame_metrics
+    }
+
+    #[must_use]
+    pub const fn accessibility_metrics(&self) -> AccessibilityMetrics {
+        self.accessibility_metrics
     }
 
     pub fn due_timers(&mut self, now: Instant) -> Vec<u64> {
@@ -848,6 +985,8 @@ mod tests {
         };
         assert_eq!(state.accessibility.focused(), None);
         assert!(model.events.is_empty());
+        assert_eq!(model.accessibility_metrics().focus_requests, 1);
+        assert_eq!(model.accessibility_metrics().rejected, 2);
     }
 
     #[test]
@@ -932,6 +1071,71 @@ mod tests {
                 .code(),
             "PLATFORM_QUEUE_FULL"
         );
+        assert_eq!(model.accessibility_metrics().action_requests, 1);
+        assert_eq!(model.accessibility_metrics().rejected, 2);
+    }
+
+    #[test]
+    fn tracks_accessibility_tree_watermarks_deduplication_and_cleanup() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let child = Data::map([
+            ("编号", Data::Integer(2)),
+            ("角色", Data::String("文字".to_owned())),
+            ("名称", Data::String("内容".to_owned())),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 80.into(), 20.into()]),
+            ),
+        ]);
+        let tree = Data::map([
+            ("编号", Data::Integer(1)),
+            ("角色", Data::String("面板".to_owned())),
+            ("名称", Data::String("根".to_owned())),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 320.into(), 200.into()]),
+            ),
+            ("子", Data::Array(vec![child])),
+        ]);
+
+        assert!(
+            model
+                .replace_accessibility(window, Some(SemanticTree::validate(&tree).unwrap()))
+                .unwrap()
+        );
+        assert!(
+            !model
+                .replace_accessibility(window, Some(SemanticTree::validate(&tree).unwrap()))
+                .unwrap()
+        );
+        let metrics = model.accessibility_metrics();
+        assert_eq!(metrics.current_trees, 1);
+        assert_eq!(metrics.current_nodes, 2);
+        assert_eq!(metrics.nodes_high_watermark, 2);
+        assert_eq!(metrics.current_text_bytes, "根内容".len());
+        assert_eq!(metrics.text_bytes_high_watermark, "根内容".len());
+        assert_eq!(metrics.updates, 1);
+        assert_eq!(metrics.unchanged, 1);
+
+        assert!(model.replace_accessibility(window, None).unwrap());
+        assert_eq!(model.accessibility_metrics().current_trees, 0);
+        assert_eq!(model.accessibility_metrics().cleared, 1);
+        assert!(
+            model
+                .replace_accessibility(window, Some(SemanticTree::validate(&tree).unwrap()))
+                .unwrap()
+        );
+        model.close(window).unwrap();
+        let metrics = model.accessibility_metrics();
+        assert_eq!(metrics.current_trees, 0);
+        assert_eq!(metrics.current_nodes, 0);
+        assert_eq!(metrics.current_text_bytes, 0);
+        assert_eq!(metrics.nodes_high_watermark, 2);
+        assert_eq!(metrics.updates, 3);
     }
 
     #[test]
