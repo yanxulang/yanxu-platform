@@ -131,6 +131,10 @@ unsafe extern "C" fn dispatch(
     if output.is_null() || host.is_null() {
         return fail(error, "PLATFORM_HOST_ABI", "输出指针为空");
     }
+    unsafe { *output = Value::default() };
+    if let Some(error) = unsafe { error.as_mut() } {
+        *error = NativeError::default();
+    }
     let Some(operation) = Operation::from_context(context) else {
         return fail(error, "PLATFORM_FUNCTION", "未知平台函数");
     };
@@ -207,5 +211,48 @@ mod ffi_tests {
         assert_eq!(descriptor.function_count, FUNCTIONS.len());
         assert_eq!(descriptor.resource_type_count, RESOURCE_TYPES.len());
         assert!(descriptor.free_value.is_some());
+    }
+
+    #[test]
+    fn failed_dispatch_clears_stale_output_and_returns_stable_error() {
+        let host = abi::NativeHost {
+            abi_version: abi::ABI,
+            struct_size: std::mem::size_of::<abi::NativeHost>(),
+            context: ptr::null_mut(),
+            callback_retain: None,
+            callback_release: None,
+            callback_post: None,
+            wake: None,
+            pump: None,
+            has_permission: None,
+            resource_get: None,
+            event_loop_id: 0,
+            owner_thread_token: 0,
+        };
+        let mut output = Value {
+            kind: abi::STRING,
+            length: 99,
+            ..Value::default()
+        };
+        let mut error = NativeError::default();
+
+        let status = unsafe {
+            dispatch(
+                usize::MAX as *mut c_void,
+                ptr::null(),
+                0,
+                &host,
+                &mut output,
+                &mut error,
+            )
+        };
+
+        assert_eq!(status, abi::ERROR);
+        assert_eq!(output.kind, abi::NULL);
+        assert_eq!(output.length, 0);
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(error.code, error.code_length) },
+            b"PLATFORM_FUNCTION"
+        );
     }
 }
