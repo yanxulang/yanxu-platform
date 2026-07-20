@@ -16,6 +16,20 @@ pub const MAX_SEMANTIC_NODE_TEXT_BYTES: usize = 65_536;
 pub const MAX_SEMANTIC_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SEMANTIC_COORDINATE: f64 = 1_000_000.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessibilitySource {
+    AssistiveTechnology,
+}
+
+impl AccessibilitySource {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AssistiveTechnology => "辅助技术",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SemanticNode {
     id: i64,
@@ -120,6 +134,12 @@ impl AccessibilityState {
     pub fn focused(&self) -> Option<i64> {
         self.tree().and_then(SemanticTree::focused)
     }
+
+    pub fn focus_target(&self, id: i64) -> Result<&SemanticNodeSummary, AccessibilityError> {
+        self.tree()
+            .ok_or(AccessibilityError::Node(id))?
+            .focus_target(id)
+    }
 }
 
 impl SemanticTree {
@@ -142,6 +162,19 @@ impl SemanticTree {
     #[must_use]
     pub fn node(&self, id: i64) -> Option<&SemanticNodeSummary> {
         self.nodes.get(&id)
+    }
+
+    pub fn focus_target(&self, id: i64) -> Result<&SemanticNodeSummary, AccessibilityError> {
+        let node = self.node(id).ok_or(AccessibilityError::Node(id))?;
+        if node.actions.contains("聚焦")
+            && matches!(node.states.get("可聚焦"), Some(Data::Bool(true)))
+            && !matches!(node.states.get("启用"), Some(Data::Bool(false)))
+            && !matches!(node.states.get("可见"), Some(Data::Bool(false)))
+        {
+            Ok(node)
+        } else {
+            Err(AccessibilityError::Focus(id))
+        }
     }
 
     #[must_use]
@@ -170,6 +203,7 @@ pub enum AccessibilityError {
     Tree,
     Limit(&'static str),
     Duplicate(i64),
+    Node(i64),
     Role(String),
     State(String),
     Action(String),
@@ -184,6 +218,7 @@ impl AccessibilityError {
             Self::Tree => "PLATFORM_ACCESSIBILITY_TREE",
             Self::Limit(_) => "PLATFORM_ACCESSIBILITY_LIMIT",
             Self::Duplicate(_) => "PLATFORM_ACCESSIBILITY_DUPLICATE",
+            Self::Node(_) => "PLATFORM_ACCESSIBILITY_NODE",
             Self::Role(_) => "PLATFORM_ACCESSIBILITY_ROLE",
             Self::State(_) => "PLATFORM_ACCESSIBILITY_STATE",
             Self::Action(_) => "PLATFORM_ACCESSIBILITY_ACTION",
@@ -199,6 +234,7 @@ impl Display for AccessibilityError {
             Self::Tree => formatter.write_str("无障碍语义树结构无效"),
             Self::Limit(name) => write!(formatter, "无障碍语义树超过{name}上限"),
             Self::Duplicate(id) => write!(formatter, "无障碍节点编号 {id} 重复"),
+            Self::Node(id) => write!(formatter, "无障碍节点编号 {id} 不存在"),
             Self::Role(role) => write!(formatter, "无障碍角色无效：{role}"),
             Self::State(state) => write!(formatter, "无障碍状态无效：{state}"),
             Self::Action(action) => write!(formatter, "无障碍操作无效：{action}"),
@@ -822,5 +858,45 @@ mod tests {
         assert_eq!(state.node_count(), 0);
         assert!(!state.replace(None).unwrap());
         assert_eq!(state.revision(), 2);
+    }
+
+    #[test]
+    fn focus_requests_require_an_enabled_visible_advertised_target() {
+        let value = node(
+            1,
+            "按钮",
+            BTreeMap::from([
+                ("启用".to_owned(), Data::Bool(true)),
+                ("可见".to_owned(), Data::Bool(true)),
+                ("可聚焦".to_owned(), Data::Bool(true)),
+            ]),
+            vec!["点击", "聚焦"],
+            Vec::new(),
+        );
+        let tree = SemanticTree::validate(&value).unwrap();
+        assert_eq!(tree.focus_target(1).unwrap().role, "按钮");
+        assert_eq!(
+            tree.focus_target(2).unwrap_err().code(),
+            "PLATFORM_ACCESSIBILITY_NODE"
+        );
+
+        let disabled = node(
+            1,
+            "按钮",
+            BTreeMap::from([
+                ("启用".to_owned(), Data::Bool(false)),
+                ("可聚焦".to_owned(), Data::Bool(true)),
+            ]),
+            vec!["聚焦"],
+            Vec::new(),
+        );
+        assert_eq!(
+            SemanticTree::validate(&disabled)
+                .unwrap()
+                .focus_target(1)
+                .unwrap_err()
+                .code(),
+            "PLATFORM_ACCESSIBILITY_FOCUS"
+        );
     }
 }

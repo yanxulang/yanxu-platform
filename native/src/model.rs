@@ -1,7 +1,8 @@
 //! 无平台句柄的应用和资源所有权模型。
 
-use crate::accessibility::AccessibilityState;
-use crate::event::EventBatcher;
+use crate::accessibility::{AccessibilityError, AccessibilitySource, AccessibilityState};
+use crate::data::Data;
+use crate::event::{EventBatcher, EventKind, EventQueueError, PlatformEvent};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -185,6 +186,57 @@ impl Display for ModelError {
 }
 
 impl Error for ModelError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccessibilityEventError {
+    Model(ModelError),
+    Accessibility(AccessibilityError),
+    Queue(EventQueueError),
+}
+
+impl AccessibilityEventError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Model(ModelError::Missing(_)) => "PLATFORM_RESOURCE_CLOSED",
+            Self::Model(ModelError::Kind(_)) => "PLATFORM_RESOURCE_TYPE",
+            Self::Model(_) => "PLATFORM_RESOURCE",
+            Self::Accessibility(error) => error.code(),
+            Self::Queue(EventQueueError::Full) => "PLATFORM_QUEUE_FULL",
+            Self::Queue(EventQueueError::InvalidNumber) => "PLATFORM_VALUE_TYPE",
+        }
+    }
+}
+
+impl Display for AccessibilityEventError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Model(error) => Display::fmt(error, formatter),
+            Self::Accessibility(error) => Display::fmt(error, formatter),
+            Self::Queue(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for AccessibilityEventError {}
+
+impl From<ModelError> for AccessibilityEventError {
+    fn from(error: ModelError) -> Self {
+        Self::Model(error)
+    }
+}
+
+impl From<AccessibilityError> for AccessibilityEventError {
+    fn from(error: AccessibilityError) -> Self {
+        Self::Accessibility(error)
+    }
+}
+
+impl From<EventQueueError> for AccessibilityEventError {
+    fn from(error: EventQueueError) -> Self {
+        Self::Queue(error)
+    }
+}
 
 #[derive(Debug)]
 pub struct Model {
@@ -407,6 +459,34 @@ impl Model {
         self.frame_metrics.failed = self.frame_metrics.failed.saturating_add(1);
     }
 
+    pub fn request_accessibility_focus(
+        &mut self,
+        window_id: u64,
+        node_id: i64,
+        source: AccessibilitySource,
+        time_seconds: f64,
+    ) -> Result<(), AccessibilityEventError> {
+        let revision = {
+            let node = self.get(window_id)?;
+            let ResourceState::Window(window) = &node.state else {
+                return Err(ModelError::Kind(window_id).into());
+            };
+            window.accessibility.focus_target(node_id)?;
+            window.accessibility.revision()
+        };
+        self.events.push(
+            PlatformEvent::new(
+                EventKind::AccessibilityFocusRequested,
+                Some(window_id),
+                time_seconds,
+            )
+            .with("节点", Data::Integer(node_id))
+            .with("树修订", Data::Integer(revision))
+            .with("来源", source.name()),
+        )?;
+        Ok(())
+    }
+
     #[must_use]
     pub const fn frame_metrics(&self) -> FrameMetrics {
         self.frame_metrics
@@ -469,6 +549,7 @@ const fn allowed_parent(parent: ResourceKind, child: ResourceKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accessibility::SemanticTree;
 
     fn app(model: &mut Model) -> u64 {
         model
@@ -656,6 +737,83 @@ mod tests {
         model.close(application).unwrap();
         assert_eq!(model.frame_metrics().pending, 0);
         assert_eq!(model.frame_metrics().failed, 1);
+    }
+
+    #[test]
+    fn queues_validated_accessibility_focus_requests_without_mutating_focus() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let tree = Data::map([
+            ("编号", Data::Integer(1)),
+            ("角色", Data::String("按钮".to_owned())),
+            ("名称", Data::String("保存".to_owned())),
+            (
+                "状态",
+                Data::map([
+                    ("启用", Data::Bool(true)),
+                    ("可见", Data::Bool(true)),
+                    ("可聚焦", Data::Bool(true)),
+                ]),
+            ),
+            ("操作", Data::Array(vec![Data::String("聚焦".to_owned())])),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 80.into(), 30.into()]),
+            ),
+        ]);
+        let ResourceState::Window(state) = &mut model.get_mut(window).unwrap().state else {
+            panic!("window state expected")
+        };
+        state
+            .accessibility
+            .replace(Some(SemanticTree::validate(&tree).unwrap()))
+            .unwrap();
+        model
+            .request_accessibility_focus(window, 1, AccessibilitySource::AssistiveTechnology, 2.5)
+            .unwrap();
+        let batch = model.events.take_data().unwrap();
+        let batch = batch.as_map().unwrap();
+        let Data::Array(events) = &batch["事件"] else {
+            panic!("events expected")
+        };
+        let event = events[0].as_map().unwrap();
+        assert_eq!(event["类型"], Data::String("无障碍焦点请求".to_owned()));
+        assert_eq!(event["窗口"], Data::Integer(window as i64));
+        assert_eq!(event["节点"], Data::Integer(1));
+        assert_eq!(event["树修订"], Data::Integer(1));
+        assert_eq!(event["来源"], Data::String("辅助技术".to_owned()));
+        assert_eq!(
+            model
+                .request_accessibility_focus(
+                    window,
+                    2,
+                    AccessibilitySource::AssistiveTechnology,
+                    3.0,
+                )
+                .unwrap_err()
+                .code(),
+            "PLATFORM_ACCESSIBILITY_NODE"
+        );
+        assert_eq!(
+            model
+                .request_accessibility_focus(
+                    window,
+                    1,
+                    AccessibilitySource::AssistiveTechnology,
+                    f64::NAN,
+                )
+                .unwrap_err()
+                .code(),
+            "PLATFORM_VALUE_TYPE"
+        );
+        let ResourceState::Window(state) = &model.get(window).unwrap().state else {
+            panic!("window state expected")
+        };
+        assert_eq!(state.accessibility.focused(), None);
+        assert!(model.events.is_empty());
     }
 
     #[test]
