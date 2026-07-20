@@ -391,7 +391,7 @@ fn parse_node(
     }
     let name = optional_text(map.get("名称"), context)?;
     let description = optional_text(map.get("描述"), context)?;
-    let value = semantic_value(map.get("值"), context)?;
+    let value = semantic_value(map.get("值"), role, context)?;
     let states = semantic_states(map.get("状态"), role, id, context)?;
     let actions = semantic_actions(map.get("操作"), role, &states)?;
     let bounds = semantic_bounds(map.get("边界"))?;
@@ -466,8 +466,12 @@ fn record_text(value: &str, context: &mut ValidationContext) -> Result<(), Acces
 
 fn semantic_value(
     value: Option<&Data>,
+    role: &str,
     context: &mut ValidationContext,
 ) -> Result<Data, AccessibilityError> {
+    if role == "密码框" && !matches!(value, None | Some(Data::Nil)) {
+        return Err(AccessibilityError::State("密码框值必须为空".to_owned()));
+    }
     match value.unwrap_or(&Data::Nil) {
         Data::Nil => Ok(Data::Nil),
         Data::Bool(value) => Ok(Data::Bool(*value)),
@@ -921,6 +925,30 @@ mod tests {
             SemanticTree::validate(&invalid_action).unwrap_err().code(),
             "PLATFORM_ACCESSIBILITY_ACTION"
         );
+    }
+
+    #[test]
+    fn password_nodes_never_expose_values_in_semantic_snapshots() {
+        let mut password = node(1, "密码框", BTreeMap::new(), vec!["设置值"], Vec::new());
+        if let Data::Map(fields) = &mut password {
+            fields.insert("值".to_owned(), Data::String("secret".to_owned()));
+        } else {
+            panic!("node map expected")
+        }
+        assert_eq!(
+            SemanticTree::validate(&password).unwrap_err().code(),
+            "PLATFORM_ACCESSIBILITY_STATE"
+        );
+
+        if let Data::Map(fields) = &mut password {
+            fields.insert("值".to_owned(), Data::Nil);
+        }
+        let tree = SemanticTree::validate(&password).unwrap();
+        assert!(
+            tree.action_target(1, "设置值", &Data::String("new secret".to_owned()))
+                .is_ok()
+        );
+        assert_eq!(tree.to_data().as_map().unwrap()["值"], Data::Nil);
     }
 
     #[test]
