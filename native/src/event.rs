@@ -6,7 +6,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 pub const EVENT_MAJOR: i64 = 1;
-pub const EVENT_MINOR: i64 = 1;
+pub const EVENT_MINOR: i64 = 2;
 pub const DEFAULT_EVENT_CAPACITY: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,6 +25,7 @@ pub enum EventKind {
     WindowFocused,
     WindowUnfocused,
     RedrawRequested,
+    FramePresented,
     PointerEntered,
     PointerLeft,
     PointerMoved,
@@ -67,6 +68,7 @@ impl EventKind {
             Self::WindowFocused => "获得焦点",
             Self::WindowUnfocused => "失去焦点",
             Self::RedrawRequested => "需要重绘",
+            Self::FramePresented => "帧呈现",
             Self::PointerEntered => "指针进入",
             Self::PointerLeft => "指针离开",
             Self::PointerMoved => "指针移动",
@@ -372,6 +374,7 @@ mod tests {
             EventKind::WindowFocused,
             EventKind::WindowUnfocused,
             EventKind::RedrawRequested,
+            EventKind::FramePresented,
             EventKind::PointerEntered,
             EventKind::PointerLeft,
             EventKind::PointerMoved,
@@ -395,7 +398,7 @@ mod tests {
             EventKind::MonitorsChanged,
             EventKind::Timer,
         ];
-        assert_eq!(kinds.len(), 36);
+        assert_eq!(kinds.len(), 37);
         assert!(kinds.iter().all(|kind| !kind.name().is_empty()));
     }
 

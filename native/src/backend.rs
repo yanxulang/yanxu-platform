@@ -4,7 +4,7 @@ use crate::abi::{self, NativeError, NativeHost};
 use crate::bridge::{encode_data, free_value};
 use crate::data::Data;
 use crate::event::{EVENT_MAJOR, EVENT_MINOR, EventKind, PlatformEvent};
-use crate::model::{Model, ResourceKind, ResourceState, TimerState, WindowState};
+use crate::model::{FrameSubmission, Model, ResourceKind, ResourceState, TimerState, WindowState};
 use crate::protocol;
 use crate::sync::{RecoverMutex, recovered_lock_count};
 use crate::text::{TextError, TextLayout, TextOptions, TextService};
@@ -23,7 +23,7 @@ const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
 const PLATFORM_MAJOR: i64 = 1;
-const PLATFORM_MINOR: i64 = 3;
+const PLATFORM_MINOR: i64 = 4;
 const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPBOARD_IMAGE_DIMENSION: usize = 16_384;
 const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -193,6 +193,7 @@ pub enum Operation {
     DrawEncode,
     ClipboardReadImage,
     ClipboardWriteImage,
+    SubmitFrameFeedback,
 }
 
 impl Operation {
@@ -235,6 +236,7 @@ impl Operation {
             34 => Self::DrawEncode,
             35 => Self::ClipboardReadImage,
             36 => Self::ClipboardWriteImage,
+            37 => Self::SubmitFrameFeedback,
             _ => return None,
         })
     }
@@ -378,16 +380,15 @@ pub unsafe fn call(
             require_count(arguments, 2)?;
             let (_, resource) = unsafe { resource(arguments, 0, host, ResourceKind::Window) }?;
             let bytes = bytes(&arguments[1])?;
-            let frame = protocol::decode(bytes).map_err(draw_error_code)?;
-            let count = i64::try_from(frame.commands.len()).map_err(|_| "PLATFORM_DRAW_LIMIT")?;
-            let mut model = resource.model.lock_recover();
-            model
-                .submit_frame(resource.id, bytes.to_vec())
-                .map_err(frame_model_error)?;
-            drop(model);
-            let _ = crate::windowing::wake(host.0.event_loop_id);
-            host.wake();
+            let (count, _) = submit_frame(resource, bytes)?;
             Ok(Output::Value(Data::Integer(count)))
+        }
+        Operation::SubmitFrameFeedback => {
+            require_count(arguments, 2)?;
+            let (_, resource) = unsafe { resource(arguments, 0, host, ResourceKind::Window) }?;
+            let bytes = bytes(&arguments[1])?;
+            let (count, submission) = submit_frame(resource, bytes)?;
+            Ok(Output::Value(frame_submission_data(count, submission)))
         }
         Operation::InspectDraw => {
             require_count(arguments, 1)?;
@@ -878,6 +879,36 @@ fn protocol_info() -> Data {
     ])
 }
 
+fn submit_frame(
+    resource: &PlatformResource,
+    bytes: &[u8],
+) -> Result<(i64, FrameSubmission), &'static str> {
+    let frame = protocol::decode(bytes).map_err(draw_error_code)?;
+    let count = i64::try_from(frame.commands.len()).map_err(|_| "PLATFORM_DRAW_LIMIT")?;
+    let submitted_at_seconds = monotonic_seconds();
+    let submission = resource
+        .model
+        .lock_recover()
+        .submit_frame(resource.id, bytes.to_vec(), submitted_at_seconds)
+        .map_err(frame_model_error)?;
+    let _ = crate::windowing::wake(resource.host.0.event_loop_id);
+    resource.host.wake();
+    Ok((count, submission))
+}
+
+fn frame_submission_data(count: i64, submission: FrameSubmission) -> Data {
+    Data::map([
+        ("帧序号", u64_data(submission.sequence)),
+        ("命令数", Data::Integer(count)),
+        ("替换", Data::Bool(submission.replaced_sequence.is_some())),
+        (
+            "被替换帧",
+            submission.replaced_sequence.map_or(Data::Nil, u64_data),
+        ),
+        ("提交时间", Data::Number(submission.submitted_at_seconds)),
+    ])
+}
+
 fn capabilities() -> Data {
     Data::map([
         ("系统", Data::String(std::env::consts::OS.to_owned())),
@@ -908,6 +939,10 @@ fn capabilities() -> Data {
         ("状态故障恢复", Data::Bool(true)),
         ("运行可观测性", Data::Bool(true)),
         ("待呈现帧上限", Data::Integer(1)),
+        ("帧提交反馈", Data::Bool(true)),
+        ("帧呈现反馈", Data::Bool(true)),
+        ("帧时间基准", Data::String("进程内单调秒".to_owned())),
+        ("动画驱动事件", Data::String("帧呈现".to_owned())),
         ("Wayland", Data::Bool(cfg!(target_os = "linux"))),
         ("X11", Data::Bool(cfg!(target_os = "linux"))),
     ])
@@ -1064,6 +1099,30 @@ fn window_snapshot(resource: &PlatformResource) -> Result<Data, &'static str> {
         ),
         ("已有帧", Data::Bool(!window.frame.is_empty())),
         ("待呈现帧", Data::Bool(window.frame_pending)),
+        (
+            "帧序号",
+            if window.frame_generation != 0 {
+                u64_data(window.frame_generation)
+            } else {
+                Data::Nil
+            },
+        ),
+        (
+            "待呈现帧序号",
+            if window.frame_pending {
+                u64_data(window.frame_generation)
+            } else {
+                Data::Nil
+            },
+        ),
+        (
+            "帧提交时间",
+            if window.frame_generation != 0 {
+                Data::Number(window.frame_submitted_at_seconds)
+            } else {
+                Data::Nil
+            },
+        ),
         ("帧字节", usize_data(window.frame.len())),
     ]))
 }
@@ -1681,6 +1740,22 @@ mod tests {
             Data::Integer(1)
         );
         assert_eq!(
+            capabilities().as_map().unwrap()["帧提交反馈"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["帧呈现反馈"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["帧时间基准"],
+            Data::String("进程内单调秒".to_owned())
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["动画驱动事件"],
+            Data::String("帧呈现".to_owned())
+        );
+        assert_eq!(
             capabilities().as_map().unwrap()["剪贴板文字"],
             Data::Bool(true)
         );
@@ -1727,8 +1802,8 @@ mod tests {
                 ))
                 .unwrap();
         }
-        model.submit_frame(window, vec![1, 2]).unwrap();
-        model.submit_frame(window, vec![3, 4, 5]).unwrap();
+        model.submit_frame(window, vec![1, 2], 1.0).unwrap();
+        model.submit_frame(window, vec![3, 4, 5], 2.0).unwrap();
 
         let snapshot = debug_snapshot(&model);
         let snapshot = snapshot.as_map().unwrap();

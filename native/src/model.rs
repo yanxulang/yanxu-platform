@@ -35,6 +35,7 @@ pub struct WindowState {
     pub redraw_requested: bool,
     pub frame: Vec<u8>,
     pub frame_generation: u64,
+    pub frame_submitted_at_seconds: f64,
     pub frame_pending: bool,
     pub ime_allowed: bool,
     pub ime_cursor_area: Option<[f64; 4]>,
@@ -64,6 +65,7 @@ impl Default for WindowState {
             redraw_requested: true,
             frame: Vec::new(),
             frame_generation: 0,
+            frame_submitted_at_seconds: 0.0,
             frame_pending: false,
             ime_allowed: false,
             ime_cursor_area: None,
@@ -149,6 +151,13 @@ pub struct FrameMetrics {
     pub rendered: u64,
     pub presented: u64,
     pub failed: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameSubmission {
+    pub sequence: u64,
+    pub replaced_sequence: Option<u64>,
+    pub submitted_at_seconds: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,9 +334,14 @@ impl Model {
         self.resource_metrics
     }
 
-    pub fn submit_frame(&mut self, id: u64, frame: Vec<u8>) -> Result<u64, ModelError> {
+    pub fn submit_frame(
+        &mut self,
+        id: u64,
+        frame: Vec<u8>,
+        submitted_at_seconds: f64,
+    ) -> Result<FrameSubmission, ModelError> {
         let bytes = frame.len();
-        let (generation, replaced) = {
+        let (generation, replaced_sequence) = {
             let node = self.get_mut(id)?;
             let ResourceState::Window(window) = &mut node.state else {
                 return Err(ModelError::Kind(id));
@@ -335,18 +349,20 @@ impl Model {
             let generation = window
                 .frame_generation
                 .checked_add(1)
+                .filter(|value| *value <= i64::MAX as u64)
                 .ok_or(ModelError::FrameSequence)?;
-            let replaced = window.frame_pending;
+            let replaced_sequence = window.frame_pending.then_some(window.frame_generation);
             window.frame = frame;
             window.frame_generation = generation;
+            window.frame_submitted_at_seconds = submitted_at_seconds;
             window.frame_pending = true;
             window.redraw_requested = true;
-            (generation, replaced)
+            (generation, replaced_sequence)
         };
         self.frame_metrics.submitted = self.frame_metrics.submitted.saturating_add(1);
         self.frame_metrics.bytes_high_watermark =
             self.frame_metrics.bytes_high_watermark.max(bytes);
-        if replaced {
+        if replaced_sequence.is_some() {
             self.frame_metrics.replaced = self.frame_metrics.replaced.saturating_add(1);
         } else {
             self.frame_metrics.pending = self.frame_metrics.pending.saturating_add(1);
@@ -355,7 +371,11 @@ impl Model {
                 .pending_high_watermark
                 .max(self.frame_metrics.pending);
         }
-        Ok(generation)
+        Ok(FrameSubmission {
+            sequence: generation,
+            replaced_sequence,
+            submitted_at_seconds,
+        })
     }
 
     pub fn record_frame_rendered(&mut self) {
@@ -600,9 +620,14 @@ mod tests {
         let window = model
             .create(Some(application), ResourceState::Window(Box::default()))
             .unwrap();
-        let first = model.submit_frame(window, vec![1, 2]).unwrap();
-        let second = model.submit_frame(window, vec![3, 4, 5]).unwrap();
-        assert_eq!([first, second], [1, 2]);
+        let first = model.submit_frame(window, vec![1, 2], 1.25).unwrap();
+        let second = model.submit_frame(window, vec![3, 4, 5], 1.5).unwrap();
+        assert_eq!(first.sequence, 1);
+        assert_eq!(first.replaced_sequence, None);
+        assert_eq!(first.submitted_at_seconds, 1.25);
+        assert_eq!(second.sequence, 2);
+        assert_eq!(second.replaced_sequence, Some(1));
+        assert_eq!(second.submitted_at_seconds, 1.5);
         assert_eq!(
             model.frame_metrics(),
             FrameMetrics {
@@ -616,17 +641,37 @@ mod tests {
         );
 
         model.record_frame_rendered();
-        model.record_frame_presented(window, first);
+        model.record_frame_presented(window, first.sequence);
         assert_eq!(model.frame_metrics().pending, 1);
-        model.record_frame_presented(window, second);
+        model.record_frame_presented(window, second.sequence);
         assert_eq!(model.frame_metrics().pending, 0);
         assert_eq!(model.frame_metrics().rendered, 1);
         assert_eq!(model.frame_metrics().presented, 2);
 
-        model.submit_frame(window, vec![6]).unwrap();
+        model.submit_frame(window, vec![6], 2.0).unwrap();
         model.record_frame_failure();
         model.close(application).unwrap();
         assert_eq!(model.frame_metrics().pending, 0);
         assert_eq!(model.frame_metrics().failed, 1);
+    }
+
+    #[test]
+    fn rejects_frame_sequences_that_cannot_cross_the_data_boundary() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let node = model.get_mut(window).unwrap();
+        let ResourceState::Window(state) = &mut node.state else {
+            panic!("created resource must be a window")
+        };
+        state.frame_generation = i64::MAX as u64;
+
+        assert_eq!(
+            model.submit_frame(window, vec![1], 1.0),
+            Err(ModelError::FrameSequence)
+        );
+        assert_eq!(model.frame_metrics(), FrameMetrics::default());
     }
 }
