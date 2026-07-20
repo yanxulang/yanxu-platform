@@ -23,7 +23,7 @@ const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
 const PLATFORM_MAJOR: i64 = 1;
-const PLATFORM_MINOR: i64 = 3;
+const PLATFORM_MINOR: i64 = 4;
 const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPBOARD_IMAGE_DIMENSION: usize = 16_384;
 const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -939,6 +939,10 @@ fn capabilities() -> Data {
         ("状态故障恢复", Data::Bool(true)),
         ("运行可观测性", Data::Bool(true)),
         ("待呈现帧上限", Data::Integer(1)),
+        ("帧提交反馈", Data::Bool(true)),
+        ("帧呈现反馈", Data::Bool(true)),
+        ("帧时间基准", Data::String("进程内单调秒".to_owned())),
+        ("动画驱动事件", Data::String("帧呈现".to_owned())),
         ("Wayland", Data::Bool(cfg!(target_os = "linux"))),
         ("X11", Data::Bool(cfg!(target_os = "linux"))),
     ])
@@ -1734,6 +1738,22 @@ mod tests {
         assert_eq!(
             capabilities().as_map().unwrap()["待呈现帧上限"],
             Data::Integer(1)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["帧提交反馈"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["帧呈现反馈"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["帧时间基准"],
+            Data::String("进程内单调秒".to_owned())
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["动画驱动事件"],
+            Data::String("帧呈现".to_owned())
         );
         assert_eq!(
             capabilities().as_map().unwrap()["剪贴板文字"],
