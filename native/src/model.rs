@@ -127,6 +127,14 @@ pub struct ResourceNode {
     pub state: ResourceState,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResourceMetrics {
+    pub live: usize,
+    pub high_watermark: usize,
+    pub created: u64,
+    pub closed: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelError {
     Missing(u64),
@@ -150,6 +158,7 @@ impl Error for ModelError {}
 pub struct Model {
     next_id: u64,
     resources: BTreeMap<u64, ResourceNode>,
+    resource_metrics: ResourceMetrics,
     pub events: EventBatcher,
     pub running: bool,
     pub displays: Vec<DisplayState>,
@@ -161,6 +170,7 @@ impl Default for Model {
         Self {
             next_id: 1,
             resources: BTreeMap::new(),
+            resource_metrics: ResourceMetrics::default(),
             events: EventBatcher::default(),
             running: false,
             displays: Vec::new(),
@@ -200,6 +210,12 @@ impl Model {
                 .children
                 .insert(id);
         }
+        self.resource_metrics.live = self.resources.len();
+        self.resource_metrics.high_watermark = self
+            .resource_metrics
+            .high_watermark
+            .max(self.resource_metrics.live);
+        self.resource_metrics.created = self.resource_metrics.created.saturating_add(1);
         Ok(id)
     }
 
@@ -257,6 +273,11 @@ impl Model {
                 parent_node.children.remove(closing);
             }
         }
+        self.resource_metrics.live = self.resources.len();
+        self.resource_metrics.closed = self
+            .resource_metrics
+            .closed
+            .saturating_add(order.len() as u64);
         Ok(order)
     }
 
@@ -266,6 +287,11 @@ impl Model {
             .values()
             .filter(|node| node.state.kind() == kind)
             .count()
+    }
+
+    #[must_use]
+    pub const fn resource_metrics(&self) -> ResourceMetrics {
+        self.resource_metrics
     }
 
     pub fn due_timers(&mut self, now: Instant) -> Vec<u64> {
@@ -362,6 +388,15 @@ mod tests {
         );
         assert_eq!(model.count(ResourceKind::Application), 0);
         assert_eq!(model.count(ResourceKind::Window), 0);
+        assert_eq!(
+            model.resource_metrics(),
+            ResourceMetrics {
+                live: 0,
+                high_watermark: 3,
+                created: 3,
+                closed: 3,
+            }
+        );
     }
 
     #[test]
@@ -397,6 +432,15 @@ mod tests {
         assert_eq!(
             model.close(application),
             Err(ModelError::Missing(application))
+        );
+        assert_eq!(
+            model.resource_metrics(),
+            ResourceMetrics {
+                live: 0,
+                high_watermark: 1,
+                created: 1,
+                closed: 1,
+            }
         );
     }
 
