@@ -11,7 +11,7 @@ description = "Yanxu ABI v2 native desktop platform primitives"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-arboard = { version = "=3.6.1", default-features = false }
+arboard = { version = "=3.6.1", default-features = false, features = ["image-data"] }
 cosmic-text = { version = "=0.19.0", default-features = true }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
 rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal", "wayland"] }
