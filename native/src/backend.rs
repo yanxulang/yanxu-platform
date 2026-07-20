@@ -6,6 +6,7 @@ use crate::data::Data;
 use crate::event::{EVENT_MAJOR, EVENT_MINOR, EventKind, PlatformEvent};
 use crate::model::{Model, ResourceKind, ResourceState, TimerState, WindowState};
 use crate::protocol;
+use crate::sync::{RecoverMutex, recovered_lock_count};
 use crate::text::{TextError, TextLayout, TextOptions, TextService};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -20,6 +21,8 @@ const TYPE_WINDOW: &[u8] = b"yanxu.platform.window";
 const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
+const PLATFORM_MAJOR: i64 = 1;
+const PLATFORM_MINOR: i64 = 1;
 
 #[derive(Clone, Copy)]
 pub struct HostApi(pub NativeHost);
@@ -105,11 +108,7 @@ impl PlatformResource {
         if self.cleaned.swap(true, Ordering::AcqRel) {
             return;
         }
-        let _ = self
-            .model
-            .lock()
-            .expect("platform model poisoned")
-            .close(self.id);
+        let _ = self.model.lock_recover().close(self.id);
         for callback in &self.callbacks {
             self.host.release(*callback);
         }
@@ -265,7 +264,7 @@ pub unsafe fn call(
             host.retain(callback)?;
             let model = Arc::new(Mutex::new(Model::default()));
             let text_service = Arc::new(Mutex::new(TextService::new()));
-            let id = match model.lock().expect("platform model poisoned").create(
+            let id = match model.lock_recover().create(
                 None,
                 ResourceState::Application {
                     name,
@@ -279,8 +278,7 @@ pub unsafe fn call(
                 }
             };
             model
-                .lock()
-                .expect("platform model poisoned")
+                .lock_recover()
                 .events
                 .push(PlatformEvent::new(
                     EventKind::ApplicationStarted,
@@ -306,7 +304,7 @@ pub unsafe fn call(
             let config = map(&arguments[1])?;
             let mut window = WindowState::default();
             apply_window_config(&mut window, config)?;
-            let mut model = application.model.lock().expect("platform model poisoned");
+            let mut model = application.model.lock_recover();
             let id = model
                 .create(
                     Some(application.id),
@@ -359,12 +357,7 @@ pub unsafe fn call(
             require_count(arguments, 1)?;
             let (_, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
-            let batch = application
-                .model
-                .lock()
-                .expect("platform model poisoned")
-                .events
-                .take_data();
+            let batch = application.model.lock_recover().events.take_data();
             if let Some(batch) = batch {
                 host.post(application.callback()?, batch)?;
                 host.pump()?;
@@ -379,7 +372,7 @@ pub unsafe fn call(
             let bytes = bytes(&arguments[1])?;
             let frame = protocol::decode(bytes).map_err(draw_error_code)?;
             let count = i64::try_from(frame.commands.len()).map_err(|_| "PLATFORM_DRAW_LIMIT")?;
-            let mut model = resource.model.lock().expect("platform model poisoned");
+            let mut model = resource.model.lock_recover();
             let node = model
                 .get_mut(resource.id)
                 .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
@@ -423,7 +416,7 @@ pub unsafe fn call(
             require_count(arguments, 1)?;
             let (_, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
-            let model = application.model.lock().expect("platform model poisoned");
+            let model = application.model.lock_recover();
             Ok(Output::Value(Data::map([
                 (
                     "应用",
@@ -447,6 +440,10 @@ pub unsafe fn call(
                 ),
                 ("待处理事件", Data::Integer(model.events.len() as i64)),
                 ("运行中", Data::Bool(model.running)),
+                (
+                    "状态恢复次数",
+                    Data::Integer(i64::try_from(recovered_lock_count()).unwrap_or(i64::MAX)),
+                ),
             ])))
         }
         Operation::FontFamilies => {
@@ -455,8 +452,7 @@ pub unsafe fn call(
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
             let families = application
                 .text
-                .lock()
-                .expect("platform text service poisoned")
+                .lock_recover()
                 .families()
                 .into_iter()
                 .map(Data::String)
@@ -482,8 +478,7 @@ pub unsafe fn call(
                 .unwrap_or(false);
             let matched = application
                 .text
-                .lock()
-                .expect("platform text service poisoned")
+                .lock_recover()
                 .match_font(family, weight, italic);
             Ok(Output::Value(matched.map_or(Data::Nil, |font| {
                 Data::map([
@@ -502,15 +497,13 @@ pub unsafe fn call(
             let font_bytes = bytes(&arguments[1])?.to_vec();
             let families = application
                 .text
-                .lock()
-                .expect("platform text service poisoned")
+                .lock_recover()
                 .load_font(font_bytes.clone())
                 .map_err(text_error_code)?;
             let family = families.first().cloned().ok_or("PLATFORM_FONT_INVALID")?;
             let id = application
                 .model
-                .lock()
-                .expect("platform model poisoned")
+                .lock_recover()
                 .create(
                     Some(application.id),
                     ResourceState::Font {
@@ -538,8 +531,7 @@ pub unsafe fn call(
             let options = text_options(map(&arguments[2])?)?;
             let layout = application
                 .text
-                .lock()
-                .expect("platform text service poisoned")
+                .lock_recover()
                 .shape(content, &options)
                 .map_err(text_error_code)?;
             Ok(Output::Value(layout_data(&layout)))
@@ -552,8 +544,7 @@ pub unsafe fn call(
             let options = text_options(map(&arguments[2])?)?;
             let layout = application
                 .text
-                .lock()
-                .expect("platform text service poisoned")
+                .lock_recover()
                 .shape(content, &options)
                 .map_err(text_error_code)?;
             Ok(Output::Value(Data::map([
@@ -574,8 +565,7 @@ pub unsafe fn call(
             let y = number(&arguments[4])? as f32;
             let layout = application
                 .text
-                .lock()
-                .expect("platform text service poisoned")
+                .lock_recover()
                 .shape(content, &options)
                 .map_err(text_error_code)?;
             Ok(Output::Value(Data::Integer(
@@ -594,8 +584,7 @@ pub unsafe fn call(
             let interval = Duration::from_secs_f64(millis / 1_000.0);
             let id = application
                 .model
-                .lock()
-                .expect("platform model poisoned")
+                .lock_recover()
                 .create(
                     Some(application.id),
                     ResourceState::Timer(TimerState {
@@ -620,7 +609,7 @@ pub unsafe fn call(
         Operation::TimerCancel => {
             require_count(arguments, 1)?;
             let (_, timer) = unsafe { resource(arguments, 0, host, ResourceKind::Timer) }?;
-            let mut model = timer.model.lock().expect("platform model poisoned");
+            let mut model = timer.model.lock_recover();
             let node = model
                 .get_mut(timer.id)
                 .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
@@ -669,8 +658,7 @@ pub unsafe fn call(
             let (width, height, rgba) = decode_image(bytes(&arguments[1])?)?;
             let id = application
                 .model
-                .lock()
-                .expect("platform model poisoned")
+                .lock_recover()
                 .create(
                     Some(application.id),
                     ResourceState::Image {
@@ -694,7 +682,7 @@ pub unsafe fn call(
         Operation::ImageInfo => {
             require_count(arguments, 1)?;
             let (_, image) = unsafe { resource(arguments, 0, host, ResourceKind::Image) }?;
-            let model = image.model.lock().expect("platform model poisoned");
+            let model = image.model.lock_recover();
             let node = model
                 .get(image.id)
                 .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
@@ -717,10 +705,7 @@ pub unsafe fn call(
             let (_, window_resource) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Window) }?;
             let config = map(&arguments[1])?;
-            let mut model = window_resource
-                .model
-                .lock()
-                .expect("platform model poisoned");
+            let mut model = window_resource.model.lock_recover();
             let node = model
                 .get_mut(window_resource.id)
                 .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
@@ -744,10 +729,7 @@ pub unsafe fn call(
                 unsafe { resource(arguments, 0, host, ResourceKind::Window) }?;
             let name = text(&arguments[1])?.to_owned();
             let visible = boolean(&arguments[2])?;
-            let mut model = window_resource
-                .model
-                .lock()
-                .expect("platform model poisoned");
+            let mut model = window_resource.model.lock_recover();
             let node = model
                 .get_mut(window_resource.id)
                 .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
@@ -762,7 +744,7 @@ pub unsafe fn call(
             require_count(arguments, 1)?;
             let (_, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
-            let model = application.model.lock().expect("platform model poisoned");
+            let model = application.model.lock_recover();
             Ok(Output::Value(Data::Array(
                 model
                     .displays
@@ -801,12 +783,7 @@ pub unsafe fn call(
             require_count(arguments, 1)?;
             let (_, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
-            let theme = application
-                .model
-                .lock()
-                .expect("platform model poisoned")
-                .system_theme
-                .clone();
+            let theme = application.model.lock_recover().system_theme.clone();
             Ok(Output::Value(Data::String(theme)))
         }
         Operation::ApplicationRun => {
@@ -826,7 +803,7 @@ pub unsafe fn call(
             require_count(arguments, 1)?;
             let (_, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
-            let mut model = application.model.lock().expect("platform model poisoned");
+            let mut model = application.model.lock_recover();
             let node = model
                 .get_mut(application.id)
                 .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
@@ -849,10 +826,7 @@ pub unsafe fn call(
         Operation::TimerQuery => {
             require_count(arguments, 1)?;
             let (_, timer_resource) = unsafe { resource(arguments, 0, host, ResourceKind::Timer) }?;
-            let model = timer_resource
-                .model
-                .lock()
-                .expect("platform model poisoned");
+            let model = timer_resource.model.lock_recover();
             let node = model
                 .get(timer_resource.id)
                 .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
@@ -880,8 +854,8 @@ pub unsafe fn call(
 
 fn protocol_info() -> Data {
     Data::map([
-        ("平台主", Data::Integer(1)),
-        ("平台次", Data::Integer(0)),
+        ("平台主", Data::Integer(PLATFORM_MAJOR)),
+        ("平台次", Data::Integer(PLATFORM_MINOR)),
         ("事件主", Data::Integer(EVENT_MAJOR)),
         ("事件次", Data::Integer(EVENT_MINOR)),
         ("绘制主", Data::Integer(i64::from(protocol::DRAW_MAJOR))),
@@ -905,6 +879,7 @@ fn capabilities() -> Data {
         ("文件拖放", Data::Bool(true)),
         ("CPU二维绘制", Data::Bool(true)),
         ("复杂文字", Data::Bool(true)),
+        ("状态故障恢复", Data::Bool(true)),
         ("Wayland", Data::Bool(cfg!(target_os = "linux"))),
         ("X11", Data::Bool(cfg!(target_os = "linux"))),
     ])
@@ -952,7 +927,7 @@ fn window_command(
     name: &str,
     value: &Data,
 ) -> Result<(), &'static str> {
-    let mut model = resource.model.lock().expect("platform model poisoned");
+    let mut model = resource.model.lock_recover();
     let running = model.running;
     let node = model
         .get_mut(resource.id)
@@ -1035,7 +1010,7 @@ fn window_command(
 }
 
 fn window_snapshot(resource: &PlatformResource) -> Result<Data, &'static str> {
-    let model = resource.model.lock().expect("platform model poisoned");
+    let model = resource.model.lock_recover();
     let node = model
         .get(resource.id)
         .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
@@ -1512,6 +1487,14 @@ mod tests {
 
     #[test]
     fn protocol_and_capability_maps_are_versioned() {
+        assert_eq!(
+            protocol_info().as_map().unwrap()["平台主"],
+            Data::Integer(PLATFORM_MAJOR)
+        );
+        assert_eq!(
+            protocol_info().as_map().unwrap()["平台次"],
+            Data::Integer(PLATFORM_MINOR)
+        );
         assert_eq!(protocol_info().as_map().unwrap()["ABI"], Data::Integer(2));
         assert_eq!(
             protocol_info().as_map().unwrap()["事件次"],
@@ -1523,6 +1506,10 @@ mod tests {
         );
         assert_eq!(
             capabilities().as_map().unwrap()["原生窗口"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["状态故障恢复"],
             Data::Bool(true)
         );
     }

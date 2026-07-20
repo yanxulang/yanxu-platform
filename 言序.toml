@@ -1,7 +1,7 @@
 [包]
 格式 = 2
 名称 = "yanxu-platform"
-版本 = "0.1.0"
+版本 = "0.2.0"
 言序 = ">=1.1.7"
 入口 = "src/主.yx"
 说明 = "言序原生跨平台平台接口库"
@@ -22,25 +22,25 @@ ABI = 2
 # scripts/prepare-current.sh 在此后追加当前平台的制品、摘要与大小。
 [原生.linux.x64]
 文件 = "dist/x86_64-unknown-linux-gnu/libyanxu_platform_native.so"
-校验和 = "4eb068b8b779d51940c8d12af26307263de4fb29489d812b7ca6e5b4ac64c068"
-大小 = 9358304
+校验和 = "bfb591e42594af0a080a3689c02a14ae87ce839e852623d5fed722b2a389b442"
+大小 = 9912272
 [原生.linux.arm64]
 文件 = "dist/aarch64-unknown-linux-gnu/libyanxu_platform_native.so"
-校验和 = "4b3fe0ff52dd63cd4696f2cde91fdfc47de05878d7f81e480515250803606b79"
-大小 = 9584064
+校验和 = "125fb0088060aec29ca690111fc2c4439c54846ea97ac2761b99f0136fc40026"
+大小 = 9580616
 [原生.macos.x64]
 文件 = "dist/x86_64-apple-darwin/libyanxu_platform_native.dylib"
-校验和 = "93cba17074d38bd178a99be9e64ddb6b2507bac53827ec801d24ac3997f39253"
-大小 = 4939252
+校验和 = "66f8f24e44e6ccf4fcf088352875663c92de61949e3a27ff8ec2ceb057e88246"
+大小 = 5075380
 [原生.macos.arm64]
 文件 = "dist/aarch64-apple-darwin/libyanxu_platform_native.dylib"
-校验和 = "ad91b0a85a9f39926dc2b2127a648b29eaff2e4b3521be893f7c11ec7ffc3c9c"
-大小 = 4670368
+校验和 = "8c13d866c5ba3ee67ac4a2b0e14a01c4c46da3218a3a3300a0dd750ed8e13a82"
+大小 = 4794784
 [原生.windows.x64]
 文件 = "dist/x86_64-pc-windows-msvc/yanxu_platform_native.dll"
-校验和 = "6560a8a61a6c9fcc3c94a28e7b668d45944fc611d268c7ef517b79cbec7c17a8"
-大小 = 4186624
+校验和 = "81f030e4a436ee8c8d5f227ce1aa3b3ad86ae0bf1e2f4bd66ebb2b121c255b2a"
+大小 = 4112384
 [原生.windows.arm64]
 文件 = "dist/aarch64-pc-windows-msvc/yanxu_platform_native.dll"
-校验和 = "be1d8433c0dbcefec6a5c8fe799b35d0490f32f6d169f06ea60206fbc95686bf"
-大小 = 3541504
+校验和 = "98181f7bddfd9eb8d43d7c287512cffb91535ec183179d524e23cdc4960ac3b0"
+大小 = 3535360

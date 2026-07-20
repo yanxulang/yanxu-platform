@@ -47,10 +47,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          (cd release && sha256sum --check yanxu-platform-0.1.0-six-targets.sha256)
+          (cd release && sha256sum --check yanxu-platform-0.2.0-six-targets.sha256)
           gh release create "$TAG" \
-            release/yanxu-platform-0.1.0-six-targets.tar.gz \
-            release/yanxu-platform-0.1.0-six-targets.sha256 \
-            release/yanxu-platform-0.1.0.toml \
-            --verify-tag --title "言台 0.1.0" \
-            --notes-file docs/RELEASE_NOTES_0.1.0.md
+            release/yanxu-platform-0.2.0-six-targets.tar.gz \
+            release/yanxu-platform-0.2.0-six-targets.sha256 \
+            release/yanxu-platform-0.2.0.toml \
+            --verify-tag --title "言台 0.2.0" \
+            --notes-file docs/RELEASE_NOTES_0.2.0.md
