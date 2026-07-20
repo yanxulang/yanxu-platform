@@ -22,7 +22,7 @@ const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
 const PLATFORM_MAJOR: i64 = 1;
-const PLATFORM_MINOR: i64 = 1;
+const PLATFORM_MINOR: i64 = 2;
 
 #[derive(Clone, Copy)]
 pub struct HostApi(pub NativeHost);
@@ -373,14 +373,12 @@ pub unsafe fn call(
             let frame = protocol::decode(bytes).map_err(draw_error_code)?;
             let count = i64::try_from(frame.commands.len()).map_err(|_| "PLATFORM_DRAW_LIMIT")?;
             let mut model = resource.model.lock_recover();
-            let node = model
-                .get_mut(resource.id)
-                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
-            let ResourceState::Window(window) = &mut node.state else {
-                return Err("PLATFORM_RESOURCE_TYPE");
-            };
-            window.frame = bytes.to_vec();
-            window.redraw_requested = true;
+            model
+                .submit_frame(resource.id, bytes.to_vec())
+                .map_err(frame_model_error)?;
+            drop(model);
+            let _ = crate::windowing::wake(host.0.event_loop_id);
+            host.wake();
             Ok(Output::Value(Data::Integer(count)))
         }
         Operation::InspectDraw => {
@@ -417,34 +415,7 @@ pub unsafe fn call(
             let (_, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
             let model = application.model.lock_recover();
-            Ok(Output::Value(Data::map([
-                (
-                    "应用",
-                    Data::Integer(model.count(ResourceKind::Application) as i64),
-                ),
-                (
-                    "窗口",
-                    Data::Integer(model.count(ResourceKind::Window) as i64),
-                ),
-                (
-                    "计时器",
-                    Data::Integer(model.count(ResourceKind::Timer) as i64),
-                ),
-                (
-                    "图片",
-                    Data::Integer(model.count(ResourceKind::Image) as i64),
-                ),
-                (
-                    "字体",
-                    Data::Integer(model.count(ResourceKind::Font) as i64),
-                ),
-                ("待处理事件", Data::Integer(model.events.len() as i64)),
-                ("运行中", Data::Bool(model.running)),
-                (
-                    "状态恢复次数",
-                    Data::Integer(i64::try_from(recovered_lock_count()).unwrap_or(i64::MAX)),
-                ),
-            ])))
+            Ok(Output::Value(debug_snapshot(&model)))
         }
         Operation::FontFamilies => {
             require_count(arguments, 1)?;
@@ -880,6 +851,8 @@ fn capabilities() -> Data {
         ("CPU二维绘制", Data::Bool(true)),
         ("复杂文字", Data::Bool(true)),
         ("状态故障恢复", Data::Bool(true)),
+        ("运行可观测性", Data::Bool(true)),
+        ("待呈现帧上限", Data::Integer(1)),
         ("Wayland", Data::Bool(cfg!(target_os = "linux"))),
         ("X11", Data::Bool(cfg!(target_os = "linux"))),
     ])
@@ -1035,7 +1008,68 @@ fn window_snapshot(resource: &PlatformResource) -> Result<Data, &'static str> {
             window.display.as_ref().map_or(Data::Nil, display_data),
         ),
         ("已有帧", Data::Bool(!window.frame.is_empty())),
+        ("待呈现帧", Data::Bool(window.frame_pending)),
+        ("帧字节", usize_data(window.frame.len())),
     ]))
+}
+
+fn debug_snapshot(model: &Model) -> Data {
+    let events = model.events.metrics();
+    let resources = model.resource_metrics();
+    let frames = model.frame_metrics();
+    Data::map([
+        ("应用", usize_data(model.count(ResourceKind::Application))),
+        ("窗口", usize_data(model.count(ResourceKind::Window))),
+        ("计时器", usize_data(model.count(ResourceKind::Timer))),
+        ("图片", usize_data(model.count(ResourceKind::Image))),
+        ("字体", usize_data(model.count(ResourceKind::Font))),
+        ("待处理事件", usize_data(events.queued)),
+        ("运行中", Data::Bool(model.running)),
+        ("状态恢复次数", u64_data(recovered_lock_count())),
+        (
+            "事件队列",
+            Data::map([
+                ("容量", usize_data(events.capacity)),
+                ("当前", usize_data(events.queued)),
+                ("高水位", usize_data(events.high_watermark)),
+                ("接收总数", u64_data(events.accepted)),
+                ("合并总数", u64_data(events.coalesced)),
+                ("拒绝总数", u64_data(events.rejected)),
+                ("批次总数", u64_data(events.batches)),
+                ("排出总数", u64_data(events.drained)),
+            ]),
+        ),
+        (
+            "资源统计",
+            Data::map([
+                ("当前", usize_data(resources.live)),
+                ("高水位", usize_data(resources.high_watermark)),
+                ("创建总数", u64_data(resources.created)),
+                ("关闭总数", u64_data(resources.closed)),
+            ]),
+        ),
+        (
+            "帧统计",
+            Data::map([
+                ("待呈现", usize_data(frames.pending)),
+                ("待呈现高水位", usize_data(frames.pending_high_watermark)),
+                ("字节高水位", usize_data(frames.bytes_high_watermark)),
+                ("提交总数", u64_data(frames.submitted)),
+                ("替换总数", u64_data(frames.replaced)),
+                ("渲染总数", u64_data(frames.rendered)),
+                ("呈现总数", u64_data(frames.presented)),
+                ("失败总数", u64_data(frames.failed)),
+            ]),
+        ),
+    ])
+}
+
+fn usize_data(value: usize) -> Data {
+    Data::Integer(i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+fn u64_data(value: u64) -> Data {
+    Data::Integer(i64::try_from(value).unwrap_or(i64::MAX))
 }
 
 fn display_data(display: &crate::model::DisplayState) -> Data {
@@ -1313,6 +1347,17 @@ fn draw_error_code(error: protocol::ProtocolError) -> &'static str {
     }
 }
 
+const fn frame_model_error(error: crate::model::ModelError) -> &'static str {
+    match error {
+        crate::model::ModelError::Missing(_) => "PLATFORM_RESOURCE_CLOSED",
+        crate::model::ModelError::Kind(_) => "PLATFORM_RESOURCE_TYPE",
+        crate::model::ModelError::FrameSequence => "PLATFORM_FRAME_SEQUENCE",
+        crate::model::ModelError::Parent(_) | crate::model::ModelError::Overflow => {
+            "PLATFORM_RESOURCE"
+        }
+    }
+}
+
 fn text_options(config: &BTreeMap<String, Data>) -> Result<TextOptions, &'static str> {
     let mut options = TextOptions::default();
     if let Some(value) = config.get("字族") {
@@ -1512,6 +1557,59 @@ mod tests {
             capabilities().as_map().unwrap()["状态故障恢复"],
             Data::Bool(true)
         );
+        assert_eq!(
+            capabilities().as_map().unwrap()["运行可观测性"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["待呈现帧上限"],
+            Data::Integer(1)
+        );
+    }
+
+    #[test]
+    fn debug_snapshot_reports_queue_resource_and_frame_metrics() {
+        let mut model = Model::default();
+        let application = model
+            .create(
+                None,
+                ResourceState::Application {
+                    name: "测试".to_owned(),
+                    exit_requested: false,
+                },
+            )
+            .unwrap();
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        for time in [1.0, 2.0] {
+            model
+                .events
+                .push(PlatformEvent::new(
+                    EventKind::PointerMoved,
+                    Some(window),
+                    time,
+                ))
+                .unwrap();
+        }
+        model.submit_frame(window, vec![1, 2]).unwrap();
+        model.submit_frame(window, vec![3, 4, 5]).unwrap();
+
+        let snapshot = debug_snapshot(&model);
+        let snapshot = snapshot.as_map().unwrap();
+        assert_eq!(snapshot["待处理事件"], Data::Integer(1));
+        let events = snapshot["事件队列"].as_map().unwrap();
+        assert_eq!(events["接收总数"], Data::Integer(2));
+        assert_eq!(events["合并总数"], Data::Integer(1));
+        assert_eq!(events["高水位"], Data::Integer(1));
+        let resources = snapshot["资源统计"].as_map().unwrap();
+        assert_eq!(resources["当前"], Data::Integer(2));
+        assert_eq!(resources["创建总数"], Data::Integer(2));
+        let frames = snapshot["帧统计"].as_map().unwrap();
+        assert_eq!(frames["待呈现"], Data::Integer(1));
+        assert_eq!(frames["提交总数"], Data::Integer(2));
+        assert_eq!(frames["替换总数"], Data::Integer(1));
+        assert_eq!(frames["字节高水位"], Data::Integer(3));
     }
 
     #[test]

@@ -34,6 +34,8 @@ pub struct WindowState {
     pub display: Option<DisplayState>,
     pub redraw_requested: bool,
     pub frame: Vec<u8>,
+    pub frame_generation: u64,
+    pub frame_pending: bool,
     pub ime_allowed: bool,
     pub ime_cursor_area: Option<[f64; 4]>,
     pub ime_purpose: String,
@@ -61,6 +63,8 @@ impl Default for WindowState {
             display: None,
             redraw_requested: true,
             frame: Vec::new(),
+            frame_generation: 0,
+            frame_pending: false,
             ime_allowed: false,
             ime_cursor_area: None,
             ime_purpose: "普通".to_owned(),
@@ -127,10 +131,32 @@ pub struct ResourceNode {
     pub state: ResourceState,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResourceMetrics {
+    pub live: usize,
+    pub high_watermark: usize,
+    pub created: u64,
+    pub closed: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameMetrics {
+    pub submitted: u64,
+    pub replaced: u64,
+    pub pending: usize,
+    pub pending_high_watermark: usize,
+    pub bytes_high_watermark: usize,
+    pub rendered: u64,
+    pub presented: u64,
+    pub failed: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelError {
     Missing(u64),
     Parent(u64),
+    Kind(u64),
+    FrameSequence,
     Overflow,
 }
 
@@ -139,6 +165,8 @@ impl Display for ModelError {
         match self {
             Self::Missing(id) => write!(formatter, "平台资源 {id} 不存在或已关闭"),
             Self::Parent(id) => write!(formatter, "平台父资源 {id} 类型不允许"),
+            Self::Kind(id) => write!(formatter, "平台资源 {id} 类型不允许此操作"),
+            Self::FrameSequence => formatter.write_str("平台帧序号已耗尽"),
             Self::Overflow => formatter.write_str("平台资源编号已耗尽"),
         }
     }
@@ -150,6 +178,8 @@ impl Error for ModelError {}
 pub struct Model {
     next_id: u64,
     resources: BTreeMap<u64, ResourceNode>,
+    resource_metrics: ResourceMetrics,
+    frame_metrics: FrameMetrics,
     pub events: EventBatcher,
     pub running: bool,
     pub displays: Vec<DisplayState>,
@@ -161,6 +191,8 @@ impl Default for Model {
         Self {
             next_id: 1,
             resources: BTreeMap::new(),
+            resource_metrics: ResourceMetrics::default(),
+            frame_metrics: FrameMetrics::default(),
             events: EventBatcher::default(),
             running: false,
             displays: Vec::new(),
@@ -200,6 +232,12 @@ impl Model {
                 .children
                 .insert(id);
         }
+        self.resource_metrics.live = self.resources.len();
+        self.resource_metrics.high_watermark = self
+            .resource_metrics
+            .high_watermark
+            .max(self.resource_metrics.live);
+        self.resource_metrics.created = self.resource_metrics.created.saturating_add(1);
         Ok(id)
     }
 
@@ -249,6 +287,14 @@ impl Model {
         }
         let mut order = Vec::new();
         self.collect_close_order(id, &mut order);
+        let pending_frames = order
+            .iter()
+            .filter(|closing| {
+                self.resources.get(closing).is_some_and(|node| {
+                    matches!(&node.state, ResourceState::Window(window) if window.frame_pending)
+                })
+            })
+            .count();
         for closing in &order {
             if let Some(node) = self.resources.remove(closing)
                 && let Some(parent) = node.parent
@@ -257,6 +303,12 @@ impl Model {
                 parent_node.children.remove(closing);
             }
         }
+        self.resource_metrics.live = self.resources.len();
+        self.resource_metrics.closed = self
+            .resource_metrics
+            .closed
+            .saturating_add(order.len() as u64);
+        self.frame_metrics.pending = self.frame_metrics.pending.saturating_sub(pending_frames);
         Ok(order)
     }
 
@@ -266,6 +318,75 @@ impl Model {
             .values()
             .filter(|node| node.state.kind() == kind)
             .count()
+    }
+
+    #[must_use]
+    pub const fn resource_metrics(&self) -> ResourceMetrics {
+        self.resource_metrics
+    }
+
+    pub fn submit_frame(&mut self, id: u64, frame: Vec<u8>) -> Result<u64, ModelError> {
+        let bytes = frame.len();
+        let (generation, replaced) = {
+            let node = self.get_mut(id)?;
+            let ResourceState::Window(window) = &mut node.state else {
+                return Err(ModelError::Kind(id));
+            };
+            let generation = window
+                .frame_generation
+                .checked_add(1)
+                .ok_or(ModelError::FrameSequence)?;
+            let replaced = window.frame_pending;
+            window.frame = frame;
+            window.frame_generation = generation;
+            window.frame_pending = true;
+            window.redraw_requested = true;
+            (generation, replaced)
+        };
+        self.frame_metrics.submitted = self.frame_metrics.submitted.saturating_add(1);
+        self.frame_metrics.bytes_high_watermark =
+            self.frame_metrics.bytes_high_watermark.max(bytes);
+        if replaced {
+            self.frame_metrics.replaced = self.frame_metrics.replaced.saturating_add(1);
+        } else {
+            self.frame_metrics.pending = self.frame_metrics.pending.saturating_add(1);
+            self.frame_metrics.pending_high_watermark = self
+                .frame_metrics
+                .pending_high_watermark
+                .max(self.frame_metrics.pending);
+        }
+        Ok(generation)
+    }
+
+    pub fn record_frame_rendered(&mut self) {
+        self.frame_metrics.rendered = self.frame_metrics.rendered.saturating_add(1);
+    }
+
+    pub fn record_frame_presented(&mut self, id: u64, generation: u64) {
+        self.frame_metrics.presented = self.frame_metrics.presented.saturating_add(1);
+        let cleared = self.resources.get_mut(&id).is_some_and(|node| {
+            let ResourceState::Window(window) = &mut node.state else {
+                return false;
+            };
+            if window.frame_pending && window.frame_generation == generation {
+                window.frame_pending = false;
+                true
+            } else {
+                false
+            }
+        });
+        if cleared {
+            self.frame_metrics.pending = self.frame_metrics.pending.saturating_sub(1);
+        }
+    }
+
+    pub fn record_frame_failure(&mut self) {
+        self.frame_metrics.failed = self.frame_metrics.failed.saturating_add(1);
+    }
+
+    #[must_use]
+    pub const fn frame_metrics(&self) -> FrameMetrics {
+        self.frame_metrics
     }
 
     pub fn due_timers(&mut self, now: Instant) -> Vec<u64> {
@@ -362,6 +483,15 @@ mod tests {
         );
         assert_eq!(model.count(ResourceKind::Application), 0);
         assert_eq!(model.count(ResourceKind::Window), 0);
+        assert_eq!(
+            model.resource_metrics(),
+            ResourceMetrics {
+                live: 0,
+                high_watermark: 3,
+                created: 3,
+                closed: 3,
+            }
+        );
     }
 
     #[test]
@@ -397,6 +527,15 @@ mod tests {
         assert_eq!(
             model.close(application),
             Err(ModelError::Missing(application))
+        );
+        assert_eq!(
+            model.resource_metrics(),
+            ResourceMetrics {
+                live: 0,
+                high_watermark: 1,
+                created: 1,
+                closed: 1,
+            }
         );
     }
 
@@ -452,5 +591,42 @@ mod tests {
         assert_eq!(model.fonts(), vec![(font, vec![1, 2, 3])]);
         model.close(font).unwrap();
         assert!(model.fonts().is_empty());
+    }
+
+    #[test]
+    fn replaces_one_pending_frame_and_only_clears_the_current_generation() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let first = model.submit_frame(window, vec![1, 2]).unwrap();
+        let second = model.submit_frame(window, vec![3, 4, 5]).unwrap();
+        assert_eq!([first, second], [1, 2]);
+        assert_eq!(
+            model.frame_metrics(),
+            FrameMetrics {
+                submitted: 2,
+                replaced: 1,
+                pending: 1,
+                pending_high_watermark: 1,
+                bytes_high_watermark: 3,
+                ..FrameMetrics::default()
+            }
+        );
+
+        model.record_frame_rendered();
+        model.record_frame_presented(window, first);
+        assert_eq!(model.frame_metrics().pending, 1);
+        model.record_frame_presented(window, second);
+        assert_eq!(model.frame_metrics().pending, 0);
+        assert_eq!(model.frame_metrics().rendered, 1);
+        assert_eq!(model.frame_metrics().presented, 2);
+
+        model.submit_frame(window, vec![6]).unwrap();
+        model.record_frame_failure();
+        model.close(application).unwrap();
+        assert_eq!(model.frame_metrics().pending, 0);
+        assert_eq!(model.frame_metrics().failed, 1);
     }
 }
