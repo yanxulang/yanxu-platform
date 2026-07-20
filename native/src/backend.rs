@@ -23,6 +23,7 @@ const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
 const PLATFORM_MAJOR: i64 = 1;
 const PLATFORM_MINOR: i64 = 2;
+const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 pub struct HostApi(pub NativeHost);
@@ -597,7 +598,10 @@ pub unsafe fn call(
             }
             let mut clipboard = arboard::Clipboard::new().map_err(|_| "PLATFORM_CLIPBOARD")?;
             match clipboard.get_text() {
-                Ok(value) => Ok(Output::Value(Data::String(value))),
+                Ok(value) => {
+                    validate_clipboard_text_length(value.len())?;
+                    Ok(Output::Value(Data::String(value)))
+                }
                 Err(arboard::Error::ContentNotAvailable) => Ok(Output::Value(Data::Nil)),
                 Err(_) => Err("PLATFORM_CLIPBOARD"),
             }
@@ -607,9 +611,10 @@ pub unsafe fn call(
             if !host.permission("剪贴板") {
                 return Err("PLATFORM_PERMISSION_CLIPBOARD");
             }
-            let value = text(&arguments[0])?.to_owned();
+            let value = text(&arguments[0])?;
+            validate_clipboard_text_length(value.len())?;
             arboard::Clipboard::new()
-                .and_then(|mut clipboard| clipboard.set_text(value))
+                .and_then(|mut clipboard| clipboard.set_text(value.to_owned()))
                 .map_err(|_| "PLATFORM_CLIPBOARD")?;
             Ok(Output::Value(Data::Nil))
         }
@@ -1337,6 +1342,14 @@ fn decode_image(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), &'static str> {
     Ok((width, height, rgba.into_raw()))
 }
 
+const fn validate_clipboard_text_length(length: usize) -> Result<(), &'static str> {
+    if length > MAX_CLIPBOARD_TEXT_BYTES {
+        Err("PLATFORM_CLIPBOARD_LIMIT")
+    } else {
+        Ok(())
+    }
+}
+
 fn draw_error_code(error: protocol::ProtocolError) -> &'static str {
     match error {
         protocol::ProtocolError::Major { .. } => "PLATFORM_DRAW_MAJOR",
@@ -1623,6 +1636,20 @@ mod tests {
         assert_eq!([width, height], [2, 1]);
         assert_eq!(rgba, vec![10, 20, 30, 255, 10, 20, 30, 255]);
         assert_eq!(decode_image(&[1, 2, 3]), Err("PLATFORM_IMAGE_INVALID"));
+    }
+
+    #[test]
+    fn bounds_clipboard_text_by_utf8_bytes() {
+        assert_eq!(validate_clipboard_text_length(0), Ok(()));
+        assert_eq!(
+            validate_clipboard_text_length(MAX_CLIPBOARD_TEXT_BYTES),
+            Ok(())
+        );
+        assert_eq!(
+            validate_clipboard_text_length(MAX_CLIPBOARD_TEXT_BYTES + 1),
+            Err("PLATFORM_CLIPBOARD_LIMIT")
+        );
+        assert_eq!("言".len(), 3);
     }
 
     #[test]
