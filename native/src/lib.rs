@@ -4,6 +4,7 @@
 //! 模型能够由普通单元测试覆盖。
 
 pub mod abi;
+pub mod accessibility;
 pub mod backend;
 pub mod bridge;
 pub mod data;
