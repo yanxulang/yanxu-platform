@@ -177,6 +177,24 @@ pub struct EventBatcher {
     next_sequence: i64,
     batch_sequence: i64,
     events: Vec<PlatformEvent>,
+    high_watermark: usize,
+    accepted: u64,
+    coalesced: u64,
+    rejected: u64,
+    batches: u64,
+    drained: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventQueueMetrics {
+    pub capacity: usize,
+    pub queued: usize,
+    pub high_watermark: usize,
+    pub accepted: u64,
+    pub coalesced: u64,
+    pub rejected: u64,
+    pub batches: u64,
+    pub drained: u64,
 }
 
 impl Default for EventBatcher {
@@ -193,11 +211,18 @@ impl EventBatcher {
             next_sequence: 1,
             batch_sequence: 1,
             events: Vec::new(),
+            high_watermark: 0,
+            accepted: 0,
+            coalesced: 0,
+            rejected: 0,
+            batches: 0,
+            drained: 0,
         }
     }
 
     pub fn push(&mut self, mut event: PlatformEvent) -> Result<(), EventQueueError> {
         if !event.time_seconds.is_finite() {
+            self.rejected = self.rejected.saturating_add(1);
             return Err(EventQueueError::InvalidNumber);
         }
         event.sequence = self.next_sequence;
@@ -210,12 +235,19 @@ impl EventBatcher {
             match event.kind.coalescing() {
                 Coalescing::Latest => {
                     *previous = event;
+                    self.accepted = self.accepted.saturating_add(1);
+                    self.coalesced = self.coalesced.saturating_add(1);
                     return Ok(());
                 }
                 Coalescing::AccumulateWheel => {
-                    accumulate_wheel(previous, &event)?;
+                    if let Err(error) = accumulate_wheel(previous, &event) {
+                        self.rejected = self.rejected.saturating_add(1);
+                        return Err(error);
+                    }
                     previous.sequence = event.sequence;
                     previous.time_seconds = event.time_seconds;
+                    self.accepted = self.accepted.saturating_add(1);
+                    self.coalesced = self.coalesced.saturating_add(1);
                     return Ok(());
                 }
                 Coalescing::Never => {}
@@ -223,9 +255,12 @@ impl EventBatcher {
         }
 
         if self.events.len() >= self.capacity {
+            self.rejected = self.rejected.saturating_add(1);
             return Err(EventQueueError::Full);
         }
         self.events.push(event);
+        self.accepted = self.accepted.saturating_add(1);
+        self.high_watermark = self.high_watermark.max(self.events.len());
         Ok(())
     }
 
@@ -239,16 +274,33 @@ impl EventBatcher {
         self.events.is_empty()
     }
 
+    #[must_use]
+    pub const fn metrics(&self) -> EventQueueMetrics {
+        EventQueueMetrics {
+            capacity: self.capacity,
+            queued: self.events.len(),
+            high_watermark: self.high_watermark,
+            accepted: self.accepted,
+            coalesced: self.coalesced,
+            rejected: self.rejected,
+            batches: self.batches,
+            drained: self.drained,
+        }
+    }
+
     pub fn take_data(&mut self) -> Option<Data> {
         if self.events.is_empty() {
             return None;
         }
         let sequence = self.batch_sequence;
         self.batch_sequence = self.batch_sequence.saturating_add(1);
+        let drained = self.events.len() as u64;
         let events = std::mem::take(&mut self.events)
             .into_iter()
             .map(|event| event.to_data())
             .collect();
+        self.batches = self.batches.saturating_add(1);
+        self.drained = self.drained.saturating_add(drained);
         Some(Data::map([
             ("协议主", Data::Integer(EVENT_MAJOR)),
             ("协议次", Data::Integer(EVENT_MINOR)),
@@ -440,5 +492,50 @@ mod tests {
             batcher.push(PlatformEvent::new(EventKind::KeyUp, Some(1), 2.0)),
             Err(EventQueueError::Full)
         );
+        assert_eq!(
+            batcher.metrics(),
+            EventQueueMetrics {
+                capacity: 1,
+                queued: 1,
+                high_watermark: 1,
+                accepted: 1,
+                coalesced: 0,
+                rejected: 1,
+                batches: 0,
+                drained: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn reports_coalescing_watermark_and_drained_batches() {
+        let mut batcher = EventBatcher::with_capacity(8);
+        for x in [1.0, 2.0, 3.0] {
+            batcher
+                .push(PlatformEvent::new(EventKind::PointerMoved, Some(1), x).with("横坐标", x))
+                .unwrap();
+        }
+        batcher
+            .push(PlatformEvent::new(EventKind::KeyDown, Some(1), 4.0))
+            .unwrap();
+        assert_eq!(
+            batcher.metrics(),
+            EventQueueMetrics {
+                capacity: 8,
+                queued: 2,
+                high_watermark: 2,
+                accepted: 4,
+                coalesced: 2,
+                rejected: 0,
+                batches: 0,
+                drained: 0,
+            }
+        );
+
+        assert!(batcher.take_data().is_some());
+        assert_eq!(batcher.metrics().queued, 0);
+        assert_eq!(batcher.metrics().batches, 1);
+        assert_eq!(batcher.metrics().drained, 2);
+        assert_eq!(batcher.metrics().high_watermark, 2);
     }
 }
