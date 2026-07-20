@@ -1,14 +1,14 @@
-# 言台 0.5.0 原生制品来源
+# 言台 0.6.0 原生制品来源
 
 版本标签中的六个动态库来自 GitHub Actions `CI` 成功运行
-[`29761102761`](https://github.com/yanxulang/yanxu-platform/actions/runs/29761102761)。
+[`29768490886`](https://github.com/yanxulang/yanxu-platform/actions/runs/29768490886)。
 
 | 字段 | 值 |
 | --- | --- |
 | 工作流 | `CI` |
 | 事件 | `pull_request` |
-| 源分支 | `feat/platform-0.5-frame-feedback` |
-| 源提交 | `a386b9bb9de5a3f3753b0dbf74a511f86c7cda5f` |
+| 源分支 | `feat/platform-0.6-accessibility-protocol` |
+| 源提交 | `66bbe967eb10d10276d9d4a8ba5aa34561e632cb` |
 | 结论 | `success` |
 
 最终发布提交相对该源提交只固定同次运行生成的原生制品、完整包清单、来源记录和工作流
@@ -18,12 +18,12 @@
 
 | 目标 | Actions 制品 ID | Actions 制品摘要 | 动态库 SHA-256 | 字节数 |
 | --- | ---: | --- | --- | ---: |
-| `x86_64-unknown-linux-gnu` | `8468918984` | `8a0e5049e3a436dd5f4f5b64eb887947d82304aaa42ead9b54a9e9f83bb237` | `d627bc0b9290f6023c672bcb52edef2f0ed65cb0dc6f7d14d985193a59a16289` | 10,163,432 |
-| `aarch64-unknown-linux-gnu` | `8468912399` | `f9203374000e74d833603a68c17711c65d55ab77723866a420820bc115536ded` | `2a93aabf755666d184630fa4e35b7d15d76ea77407bafc572f656e78978127b9` | 9,839,080 |
-| `x86_64-apple-darwin` | `8468946969` | `142719d2cbe0355fa652313ac1b46066973afc727611a613c6723cdce8244ab6` | `898df3f117e9b872b0c4891f973bf0b74902931c7e9623b27ce65119c373357f` | 5,919,112 |
-| `aarch64-apple-darwin` | `8468909841` | `719d89f6dc346ae6d531ca4e2fc8dfc7fed7f18db3ee34c777ac185a1da9abe1` | `c0d7858e81c9b59a4e8208be16d63ba06c1ae3caa15ca163d2424c82f85e89fc` | 5,593,840 |
-| `x86_64-pc-windows-msvc` | `8468960960` | `0a29b91f005cb274be3f789435aac7795f83d126609b3a6572f56ddd3bb43500` | `f5a0a93afe3c43df2b2699a4165f8dd4c68d0b1dc34c24379266e8bca54ce307` | 4,278,784 |
-| `aarch64-pc-windows-msvc` | `8468934921` | `98533858037e39e5c94898dc3568e7f964fcc478143322f52ae7d40d0ae68d7d` | `3cb749e01183f6f884c39562b02dbafeec99d871765e663018fa64a2d6798dff` | 3,680,768 |
+| `x86_64-unknown-linux-gnu` | `8471860229` | `faf21b054c9a2556d289fa2e77bad3dddfb6ca5a27d2c8601ef31f2fe1702af5` | `f49c6ba79657f8369c614dad921a806187b80f41948aae6b52aca48400931279` | 10,263,464 |
+| `aarch64-unknown-linux-gnu` | `8471877763` | `77f1123d629a250456d10159f292f58ab82d6ec60174ef66232eefee9bafe568` | `5643d802a1215e398e00f6c78db6641d0f7fea023b6955585018c805d8bd0835` | 9,862,864 |
+| `x86_64-apple-darwin` | `8471880340` | `31216b2c18f3eeead3d2f7982b02f012e85a6a1734b31f418442b8eca4779aec` | `0a419dc2ac43c12ee1b81bc47f4a0e520a2845c1a1a72db675b3fd650580815c` | 6,002,464 |
+| `aarch64-apple-darwin` | `8471886622` | `6042ba41ad3f7f903dbe1568408ffd9d261dc09b312bd6b867f88f87befa96c6` | `85b75a3b1a07c34ad1a08c4867ca4c5e35f309e85b8054a10f0c5a238bf2385a` | 5,654,224 |
+| `x86_64-pc-windows-msvc` | `8471933362` | `d9499871492a0002815aba513e81355e3c6598e8a7f03cc2c9b599113f32a7c4` | `7c88764a3152390a91e45a50c666835889114ae0a19dd79e3f1c8451512c1a88` | 4,365,824 |
+| `aarch64-pc-windows-msvc` | `8471885187` | `b756c983521a24eae738e997de029a5d1d12f9aeebcb88b828667bbee1b1bffc` | `8dea75404106d7058315500fd1234695a67776d8176748e3e92edaf8bb02ae1a` | 3,756,544 |
 
 CI 每次仍在六个真实目标重新构建和测试。正式 Release 从标签读取上述固定文件，再由
 `scripts/verify-release-source.sh`重新计算摘要与大小；这样下游 Git 包和 Release 归档选中
