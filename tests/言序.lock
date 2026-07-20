@@ -4,16 +4,16 @@ target = "aarch64-apple-darwin"
 generator = "1.1.7"
 
 [root_dependencies]
-"言台" = "yanxu-platform@0.5.0#a5b4b144f221-45374654132f1ffe"
+"言台" = "yanxu-platform@0.5.0#a5b4b144f221-c333b2a549ad9726"
 
 [root_dev_dependencies]
 
 [[package]]
-id = "yanxu-platform@0.5.0#a5b4b144f221-45374654132f1ffe"
+id = "yanxu-platform@0.5.0#a5b4b144f221-c333b2a549ad9726"
 name = "yanxu-platform"
 version = "0.5.0"
 source = "path:.."
-checksum = "45374654132f1ffe160ed6e633ed66efa8f01b179f644d710db0bb664b11f46d"
+checksum = "c333b2a549ad972620710e5a46da12fb4d3d5ea9e7d51d5b6b08026eb942eb2a"
 entry = "src/主.yx"
 target = "aarch64-apple-darwin"
 minimum_yanxu = ">=1.1.7"
@@ -27,5 +27,5 @@ minimum_yanxu = ">=1.1.7"
 abi = 2
 target = "aarch64-apple-darwin"
 path = "dist/aarch64-apple-darwin/libyanxu_platform_native.dylib"
-checksum = "bc43efcd9626289e330e2c533a9c86af3bd15ef0980b76aea32fb338fb7472ec"
-size = 5576368
+checksum = "c0d7858e81c9b59a4e8208be16d63ba06c1ae3caa15ca163d2424c82f85e89fc"
+size = 5593840
