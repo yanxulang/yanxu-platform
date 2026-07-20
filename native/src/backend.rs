@@ -23,7 +23,7 @@ const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
 const PLATFORM_MAJOR: i64 = 1;
-const PLATFORM_MINOR: i64 = 2;
+const PLATFORM_MINOR: i64 = 3;
 const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPBOARD_IMAGE_DIMENSION: usize = 16_384;
 const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -889,6 +889,18 @@ fn capabilities() -> Data {
         ("触控笔", Data::Bool(true)),
         ("IME", Data::Bool(true)),
         ("剪贴板", Data::Bool(true)),
+        ("剪贴板文字", Data::Bool(true)),
+        ("剪贴板图片", Data::Bool(true)),
+        ("剪贴板文字字节上限", usize_data(MAX_CLIPBOARD_TEXT_BYTES)),
+        (
+            "剪贴板图片边长上限",
+            usize_data(MAX_CLIPBOARD_IMAGE_DIMENSION),
+        ),
+        ("剪贴板图片字节上限", usize_data(MAX_CLIPBOARD_IMAGE_BYTES)),
+        (
+            "剪贴板图片格式",
+            Data::Array(vec![Data::String("RGBA8".to_owned())]),
+        ),
         ("文件对话框", Data::Bool(true)),
         ("文件拖放", Data::Bool(true)),
         ("CPU二维绘制", Data::Bool(true)),
@@ -1667,6 +1679,26 @@ mod tests {
         assert_eq!(
             capabilities().as_map().unwrap()["待呈现帧上限"],
             Data::Integer(1)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["剪贴板文字"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["剪贴板图片"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["剪贴板文字字节上限"],
+            Data::Integer(MAX_CLIPBOARD_TEXT_BYTES as i64)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["剪贴板图片边长上限"],
+            Data::Integer(MAX_CLIPBOARD_IMAGE_DIMENSION as i64)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["剪贴板图片格式"],
+            Data::Array(vec![Data::String("RGBA8".to_owned())])
         );
     }
 
