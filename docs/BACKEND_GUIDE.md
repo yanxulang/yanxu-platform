@@ -1,6 +1,6 @@
 # 平台后端贡献指南
 
-0.4.0 的 Windows、macOS、Wayland 与 X11 支持共享 `winit`/`softbuffer` 后端。新增系统集成
+0.5.0 的 Windows、macOS、Wayland 与 X11 支持共享 `winit`/`softbuffer` 后端。新增系统集成
 应先扩展这条路径；只有上游无法表达所需原语时才增加小型 `cfg(target_os)` 适配器。
 
 ## 边界
