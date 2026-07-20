@@ -5,6 +5,7 @@ use crate::data::Data;
 use crate::event::{EventKind, PlatformEvent};
 use crate::model::{DisplayState, Model, ResourceKind, ResourceState, WindowState};
 use crate::render::{ImageData, RenderEngine};
+use crate::sync::RecoverMutex;
 use softbuffer::{Context, Surface};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroU32;
@@ -36,10 +37,7 @@ struct ProxyGuard {
 impl Drop for ProxyGuard {
     fn drop(&mut self) {
         if let Some(proxies) = PROXIES.get() {
-            proxies
-                .lock()
-                .expect("platform proxy registry poisoned")
-                .remove(&self.event_loop_id);
+            proxies.lock_recover().remove(&self.event_loop_id);
         }
     }
 }
@@ -48,19 +46,13 @@ impl Drop for ProxyGuard {
 pub fn wake(event_loop_id: u64) -> bool {
     PROXIES
         .get()
-        .and_then(|proxies| {
-            proxies
-                .lock()
-                .expect("platform proxy registry poisoned")
-                .get(&event_loop_id)
-                .cloned()
-        })
+        .and_then(|proxies| proxies.lock_recover().get(&event_loop_id).cloned())
         .is_some_and(|proxy| proxy.send_event(()).is_ok())
 }
 
 impl Drop for RunningGuard {
     fn drop(&mut self) {
-        self.model.lock().expect("platform model poisoned").running = false;
+        self.model.lock_recover().running = false;
     }
 }
 
@@ -72,7 +64,7 @@ pub fn run(
     application_id: u64,
 ) -> Result<(), &'static str> {
     {
-        let mut model = model.lock().expect("platform model poisoned");
+        let mut model = model.lock_recover();
         if model.running {
             return Err("PLATFORM_EVENT_LOOP_RUNNING");
         }
@@ -87,8 +79,7 @@ pub fn run(
     let event_loop = EventLoop::new().map_err(|_| "PLATFORM_EVENT_LOOP")?;
     PROXIES
         .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("platform proxy registry poisoned")
+        .lock_recover()
         .insert(host.0.event_loop_id, event_loop.create_proxy());
     let _proxy = ProxyGuard {
         event_loop_id: host.0.event_loop_id,
@@ -158,14 +149,7 @@ impl Runner {
         if self.fatal.is_some() {
             return;
         }
-        if self
-            .model
-            .lock()
-            .expect("platform model poisoned")
-            .events
-            .push(event)
-            .is_err()
-        {
+        if self.model.lock_recover().events.push(event).is_err() {
             self.fail("PLATFORM_QUEUE_FULL");
         }
     }
@@ -174,12 +158,7 @@ impl Runner {
         if self.fatal.is_some() {
             return;
         }
-        let batch = self
-            .model
-            .lock()
-            .expect("platform model poisoned")
-            .events
-            .take_data();
+        let batch = self.model.lock_recover().events.take_data();
         let Some(batch) = batch else {
             return;
         };
@@ -194,17 +173,12 @@ impl Runner {
 
     fn application_state(&self) -> Option<bool> {
         self.model
-            .lock()
-            .expect("platform model poisoned")
+            .lock_recover()
             .application_exit_requested(self.application_id)
     }
 
     fn process_timers(&mut self) {
-        let due = self
-            .model
-            .lock()
-            .expect("platform model poisoned")
-            .due_timers(Instant::now());
+        let due = self.model.lock_recover().due_timers(Instant::now());
         for timer in due {
             self.push(
                 PlatformEvent::new(EventKind::Timer, None, monotonic_seconds())
@@ -226,7 +200,7 @@ impl Runner {
         });
         let theme = theme_name(event_loop.system_theme());
         let (monitors_changed, theme_changed) = {
-            let mut model = self.model.lock().expect("platform model poisoned");
+            let mut model = self.model.lock_recover();
             let monitors_changed = model.displays != displays;
             let theme_changed = model.system_theme != theme;
             model.displays = displays;
@@ -258,11 +232,7 @@ impl Runner {
             return;
         }
 
-        let states = self
-            .model
-            .lock()
-            .expect("platform model poisoned")
-            .windows();
+        let states = self.model.lock_recover().windows();
         let expected: BTreeSet<_> = states.iter().map(|(id, _)| *id).collect();
         let removed: Vec<_> = self
             .windows
@@ -310,7 +280,7 @@ impl Runner {
             }
         }
         if !cleared_redraw.is_empty() {
-            let mut model = self.model.lock().expect("platform model poisoned");
+            let mut model = self.model.lock_recover();
             for id in cleared_redraw {
                 if let Ok(node) = model.get_mut(id)
                     && let ResourceState::Window(window) = &mut node.state
@@ -359,7 +329,7 @@ impl Runner {
             .current_monitor()
             .map(|monitor| display_state(&monitor, primary.as_ref()));
         {
-            let mut model = self.model.lock().expect("platform model poisoned");
+            let mut model = self.model.lock_recover();
             if let Ok(node) = model.get_mut(model_id)
                 && let ResourceState::Window(window_state) = &mut node.state
             {
@@ -384,7 +354,7 @@ impl Runner {
     where
         F: FnOnce(&mut WindowState),
     {
-        let mut model = self.model.lock().expect("platform model poisoned");
+        let mut model = self.model.lock_recover();
         if let Ok(node) = model.get_mut(model_id)
             && let ResourceState::Window(window) = &mut node.state
         {
@@ -421,7 +391,7 @@ impl Runner {
         };
         let size = native.window.inner_size();
         let (frame, scale) = {
-            let mut model = self.model.lock().expect("platform model poisoned");
+            let mut model = self.model.lock_recover();
             let Ok(node) = model.get_mut(model_id) else {
                 return;
             };
@@ -473,7 +443,7 @@ impl Runner {
     }
 
     fn sync_fonts(&mut self) {
-        let fonts = self.model.lock().expect("platform model poisoned").fonts();
+        let fonts = self.model.lock_recover().fonts();
         for (id, bytes) in fonts {
             if self.loaded_fonts.insert(id) {
                 self.renderer.load_font_data(bytes);
@@ -486,11 +456,7 @@ impl Runner {
             event_loop.exit();
             return;
         }
-        let deadline = self
-            .model
-            .lock()
-            .expect("platform model poisoned")
-            .next_timer_deadline();
+        let deadline = self.model.lock_recover().next_timer_deadline();
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
@@ -581,11 +547,7 @@ impl Runner {
                 }
             }
             WindowEvent::Destroyed => {
-                let _ = self
-                    .model
-                    .lock()
-                    .expect("platform model poisoned")
-                    .close(model_id);
+                let _ = self.model.lock_recover().close(model_id);
                 if let Some(native) = self.windows.remove(&model_id) {
                     self.window_ids.remove(&native.window.id());
                     self.focused.remove(&native.window.id());
@@ -853,11 +815,7 @@ impl Runner {
             }
             WindowEvent::ThemeChanged(theme) => {
                 let theme = theme_name(Some(theme));
-                self.model
-                    .lock()
-                    .expect("platform model poisoned")
-                    .system_theme
-                    .clone_from(&theme);
+                self.model.lock_recover().system_theme.clone_from(&theme);
                 self.push(
                     PlatformEvent::new(
                         EventKind::ThemeChanged,

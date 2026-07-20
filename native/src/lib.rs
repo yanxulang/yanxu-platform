@@ -12,6 +12,7 @@ pub mod event;
 pub mod model;
 pub mod protocol;
 pub mod render;
+pub mod sync;
 pub mod text;
 pub mod windowing;
 
