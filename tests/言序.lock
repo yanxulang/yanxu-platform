@@ -4,16 +4,16 @@ target = "aarch64-apple-darwin"
 generator = "1.1.7"
 
 [root_dependencies]
-"言台" = "yanxu-platform@0.4.0#a5b4b144f221-6b2c553cc152e744"
+"言台" = "yanxu-platform@0.4.0#a5b4b144f221-66fa03d4d35e339a"
 
 [root_dev_dependencies]
 
 [[package]]
-id = "yanxu-platform@0.4.0#a5b4b144f221-6b2c553cc152e744"
+id = "yanxu-platform@0.4.0#a5b4b144f221-66fa03d4d35e339a"
 name = "yanxu-platform"
 version = "0.4.0"
 source = "path:.."
-checksum = "6b2c553cc152e744461e0638c058a40cd6eb77aa2fa73a369b3512d34e31a74b"
+checksum = "66fa03d4d35e339aa7e1cd49e293ed0f8dcaa1cb54250fb9b04152cc8c6efb70"
 entry = "src/主.yx"
 target = "aarch64-apple-darwin"
 minimum_yanxu = ">=1.1.7"

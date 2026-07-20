@@ -73,6 +73,7 @@ static FUNCTIONS: &[(&[u8], Operation)] = &[
     ("绘制编码".as_bytes(), Operation::DrawEncode),
     ("剪贴板读取图片".as_bytes(), Operation::ClipboardReadImage),
     ("剪贴板写入图片".as_bytes(), Operation::ClipboardWriteImage),
+    ("帧提交反馈".as_bytes(), Operation::SubmitFrameFeedback),
 ];
 
 #[unsafe(no_mangle)]
