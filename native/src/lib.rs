@@ -71,6 +71,8 @@ static FUNCTIONS: &[(&[u8], Operation)] = &[
     ("事件唤醒".as_bytes(), Operation::Wake),
     ("计时器查询".as_bytes(), Operation::TimerQuery),
     ("绘制编码".as_bytes(), Operation::DrawEncode),
+    ("剪贴板读取图片".as_bytes(), Operation::ClipboardReadImage),
+    ("剪贴板写入图片".as_bytes(), Operation::ClipboardWriteImage),
 ];
 
 #[unsafe(no_mangle)]

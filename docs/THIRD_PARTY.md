@@ -10,13 +10,18 @@
 | `tiny-skia` | 0.11.4 | 跨平台一致的二维栅格化 | BSD-3-Clause |
 | `cosmic-text` | 0.19.0 | 字体回退、复杂文字整形、测量与字形栅格化 | MIT OR Apache-2.0 |
 | `image` | 0.25.10 | 有界 PNG/JPEG 解码 | MIT OR Apache-2.0 |
-| `arboard` | 3.6.1 | 系统剪贴板 | MIT OR Apache-2.0 |
+| `arboard` | 3.6.1 | 有界 UTF-8 与 RGBA8 系统剪贴板 | MIT OR Apache-2.0 |
 | `rfd` | 0.17.2 | 原生文件和目录对话框 | MIT |
 
 这些依赖不向言序 API 暴露自身类型或平台句柄。`winit + softbuffer + tiny-skia` 相比
 浏览器/WebView 路线保留真正原生桌面窗口；相比首版直接采用 GPU 栈，能在虚拟机、
 远程桌面和无硬件加速环境维持同一绘制结果。`cosmic-text` 0.19 使用仍受维护的
 HarfRust 整形链，替代旧版已停止维护的 RustyBuzz 链。
+
+0.4.0 为 `arboard` 启用 `image-data` 功能，以便在六个目标读取和写入 RGBA8 图片。该功能
+增加 `tiff` 及其 `fax`、`half`、`weezl` 等传递构建依赖；言台不向公开 API 暴露这些
+编解码器，也不接受 TIFF 字节输入。所有版本由 `Cargo.lock` 固定并进入同一许可、来源与
+公告门禁。
 
 ## Wayland 安全补丁
 

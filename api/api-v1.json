@@ -908,6 +908,31 @@
       "async": false,
       "documentation": "",
       "kind": "function",
+      "name": "剪贴板读取图片",
+      "parameters": [],
+      "result": "典|空",
+      "signature": "法（）：典|空",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
+      "name": "剪贴板写入图片",
+      "parameters": [
+        {
+          "name": "图片",
+          "type": "典"
+        }
+      ],
+      "result": "任意",
+      "signature": "法（典）：任意",
+      "static": false
+    },
+    {
+      "async": false,
+      "documentation": "",
+      "kind": "function",
       "name": "打开文件",
       "parameters": [
         {

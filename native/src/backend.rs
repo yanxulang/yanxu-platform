@@ -8,6 +8,7 @@ use crate::model::{Model, ResourceKind, ResourceState, TimerState, WindowState};
 use crate::protocol;
 use crate::sync::{RecoverMutex, recovered_lock_count};
 use crate::text::{TextError, TextLayout, TextOptions, TextService};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::io::Cursor;
@@ -22,7 +23,10 @@ const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
 const PLATFORM_MAJOR: i64 = 1;
-const PLATFORM_MINOR: i64 = 2;
+const PLATFORM_MINOR: i64 = 3;
+const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CLIPBOARD_IMAGE_DIMENSION: usize = 16_384;
+const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 pub struct HostApi(pub NativeHost);
@@ -187,6 +191,8 @@ pub enum Operation {
     Wake,
     TimerQuery,
     DrawEncode,
+    ClipboardReadImage,
+    ClipboardWriteImage,
 }
 
 impl Operation {
@@ -227,6 +233,8 @@ impl Operation {
             32 => Self::Wake,
             33 => Self::TimerQuery,
             34 => Self::DrawEncode,
+            35 => Self::ClipboardReadImage,
+            36 => Self::ClipboardWriteImage,
             _ => return None,
         })
     }
@@ -597,7 +605,10 @@ pub unsafe fn call(
             }
             let mut clipboard = arboard::Clipboard::new().map_err(|_| "PLATFORM_CLIPBOARD")?;
             match clipboard.get_text() {
-                Ok(value) => Ok(Output::Value(Data::String(value))),
+                Ok(value) => {
+                    validate_clipboard_text_length(value.len())?;
+                    Ok(Output::Value(Data::String(value)))
+                }
                 Err(arboard::Error::ContentNotAvailable) => Ok(Output::Value(Data::Nil)),
                 Err(_) => Err("PLATFORM_CLIPBOARD"),
             }
@@ -607,9 +618,41 @@ pub unsafe fn call(
             if !host.permission("剪贴板") {
                 return Err("PLATFORM_PERMISSION_CLIPBOARD");
             }
-            let value = text(&arguments[0])?.to_owned();
+            let value = text(&arguments[0])?;
+            validate_clipboard_text_length(value.len())?;
             arboard::Clipboard::new()
-                .and_then(|mut clipboard| clipboard.set_text(value))
+                .and_then(|mut clipboard| clipboard.set_text(value.to_owned()))
+                .map_err(|_| "PLATFORM_CLIPBOARD")?;
+            Ok(Output::Value(Data::Nil))
+        }
+        Operation::ClipboardReadImage => {
+            require_count(arguments, 0)?;
+            if !host.permission("剪贴板") {
+                return Err("PLATFORM_PERMISSION_CLIPBOARD");
+            }
+            let mut clipboard = arboard::Clipboard::new().map_err(|_| "PLATFORM_CLIPBOARD")?;
+            match clipboard.get_image() {
+                Ok(image) => {
+                    validate_clipboard_image(image.width, image.height, image.bytes.len())?;
+                    Ok(Output::Value(Data::map([
+                        ("格式", Data::String("RGBA8".to_owned())),
+                        ("宽", usize_data(image.width)),
+                        ("高", usize_data(image.height)),
+                        ("内容", Data::Bytes(image.bytes.into_owned())),
+                    ])))
+                }
+                Err(arboard::Error::ContentNotAvailable) => Ok(Output::Value(Data::Nil)),
+                Err(_) => Err("PLATFORM_CLIPBOARD"),
+            }
+        }
+        Operation::ClipboardWriteImage => {
+            require_count(arguments, 1)?;
+            if !host.permission("剪贴板") {
+                return Err("PLATFORM_PERMISSION_CLIPBOARD");
+            }
+            let image = clipboard_image(map(&arguments[0])?)?;
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.set_image(image))
                 .map_err(|_| "PLATFORM_CLIPBOARD")?;
             Ok(Output::Value(Data::Nil))
         }
@@ -846,6 +889,18 @@ fn capabilities() -> Data {
         ("触控笔", Data::Bool(true)),
         ("IME", Data::Bool(true)),
         ("剪贴板", Data::Bool(true)),
+        ("剪贴板文字", Data::Bool(true)),
+        ("剪贴板图片", Data::Bool(true)),
+        ("剪贴板文字字节上限", usize_data(MAX_CLIPBOARD_TEXT_BYTES)),
+        (
+            "剪贴板图片边长上限",
+            usize_data(MAX_CLIPBOARD_IMAGE_DIMENSION),
+        ),
+        ("剪贴板图片字节上限", usize_data(MAX_CLIPBOARD_IMAGE_BYTES)),
+        (
+            "剪贴板图片格式",
+            Data::Array(vec![Data::String("RGBA8".to_owned())]),
+        ),
         ("文件对话框", Data::Bool(true)),
         ("文件拖放", Data::Bool(true)),
         ("CPU二维绘制", Data::Bool(true)),
@@ -1337,6 +1392,66 @@ fn decode_image(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), &'static str> {
     Ok((width, height, rgba.into_raw()))
 }
 
+const fn validate_clipboard_text_length(length: usize) -> Result<(), &'static str> {
+    if length > MAX_CLIPBOARD_TEXT_BYTES {
+        Err("PLATFORM_CLIPBOARD_LIMIT")
+    } else {
+        Ok(())
+    }
+}
+
+fn clipboard_image<'a>(
+    value: &'a BTreeMap<String, Data>,
+) -> Result<arboard::ImageData<'a>, &'static str> {
+    if value.get("格式").map(text).transpose()?.unwrap_or("RGBA8") != "RGBA8" {
+        return Err("PLATFORM_CLIPBOARD_IMAGE");
+    }
+    let width = clipboard_dimension(value.get("宽").ok_or("PLATFORM_CLIPBOARD_IMAGE")?)?;
+    let height = clipboard_dimension(value.get("高").ok_or("PLATFORM_CLIPBOARD_IMAGE")?)?;
+    let content = bytes(value.get("内容").ok_or("PLATFORM_CLIPBOARD_IMAGE")?)?;
+    validate_clipboard_image(width, height, content.len())?;
+    Ok(arboard::ImageData {
+        width,
+        height,
+        bytes: Cow::Borrowed(content),
+    })
+}
+
+fn clipboard_dimension(value: &Data) -> Result<usize, &'static str> {
+    let value = usize::try_from(integer(value)?).map_err(|_| "PLATFORM_CLIPBOARD_IMAGE")?;
+    if value == 0 {
+        return Err("PLATFORM_CLIPBOARD_IMAGE");
+    }
+    if value > MAX_CLIPBOARD_IMAGE_DIMENSION {
+        return Err("PLATFORM_CLIPBOARD_LIMIT");
+    }
+    Ok(value)
+}
+
+fn validate_clipboard_image(
+    width: usize,
+    height: usize,
+    length: usize,
+) -> Result<(), &'static str> {
+    if width == 0 || height == 0 {
+        return Err("PLATFORM_CLIPBOARD_IMAGE");
+    }
+    if width > MAX_CLIPBOARD_IMAGE_DIMENSION || height > MAX_CLIPBOARD_IMAGE_DIMENSION {
+        return Err("PLATFORM_CLIPBOARD_LIMIT");
+    }
+    let expected = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or("PLATFORM_CLIPBOARD_LIMIT")?;
+    if expected > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err("PLATFORM_CLIPBOARD_LIMIT");
+    }
+    if length != expected {
+        return Err("PLATFORM_CLIPBOARD_IMAGE");
+    }
+    Ok(())
+}
+
 fn draw_error_code(error: protocol::ProtocolError) -> &'static str {
     match error {
         protocol::ProtocolError::Major { .. } => "PLATFORM_DRAW_MAJOR",
@@ -1565,6 +1680,26 @@ mod tests {
             capabilities().as_map().unwrap()["待呈现帧上限"],
             Data::Integer(1)
         );
+        assert_eq!(
+            capabilities().as_map().unwrap()["剪贴板文字"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["剪贴板图片"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["剪贴板文字字节上限"],
+            Data::Integer(MAX_CLIPBOARD_TEXT_BYTES as i64)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["剪贴板图片边长上限"],
+            Data::Integer(MAX_CLIPBOARD_IMAGE_DIMENSION as i64)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["剪贴板图片格式"],
+            Data::Array(vec![Data::String("RGBA8".to_owned())])
+        );
     }
 
     #[test]
@@ -1623,6 +1758,50 @@ mod tests {
         assert_eq!([width, height], [2, 1]);
         assert_eq!(rgba, vec![10, 20, 30, 255, 10, 20, 30, 255]);
         assert_eq!(decode_image(&[1, 2, 3]), Err("PLATFORM_IMAGE_INVALID"));
+    }
+
+    #[test]
+    fn bounds_clipboard_text_by_utf8_bytes() {
+        assert_eq!(validate_clipboard_text_length(0), Ok(()));
+        assert_eq!(
+            validate_clipboard_text_length(MAX_CLIPBOARD_TEXT_BYTES),
+            Ok(())
+        );
+        assert_eq!(
+            validate_clipboard_text_length(MAX_CLIPBOARD_TEXT_BYTES + 1),
+            Err("PLATFORM_CLIPBOARD_LIMIT")
+        );
+        assert_eq!("言".len(), 3);
+    }
+
+    #[test]
+    fn validates_bounded_rgba_clipboard_images() {
+        assert_eq!(validate_clipboard_image(2, 1, 8), Ok(()));
+        assert_eq!(
+            validate_clipboard_image(2, 1, 7),
+            Err("PLATFORM_CLIPBOARD_IMAGE")
+        );
+        assert_eq!(
+            validate_clipboard_image(0, 1, 0),
+            Err("PLATFORM_CLIPBOARD_IMAGE")
+        );
+        assert_eq!(
+            validate_clipboard_image(MAX_CLIPBOARD_IMAGE_DIMENSION + 1, 1, 4),
+            Err("PLATFORM_CLIPBOARD_LIMIT")
+        );
+        assert_eq!(
+            validate_clipboard_image(16_384, 16_384, 1_073_741_824),
+            Err("PLATFORM_CLIPBOARD_LIMIT")
+        );
+
+        let value = BTreeMap::from([
+            ("格式".to_owned(), Data::String("RGBA8".to_owned())),
+            ("宽".to_owned(), Data::Integer(2)),
+            ("高".to_owned(), Data::Integer(1)),
+            ("内容".to_owned(), Data::Bytes(vec![0; 8])),
+        ]);
+        let image = clipboard_image(&value).unwrap();
+        assert_eq!([image.width, image.height, image.bytes.len()], [2, 1, 8]);
     }
 
     #[test]
