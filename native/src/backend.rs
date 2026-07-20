@@ -21,6 +21,8 @@ const TYPE_WINDOW: &[u8] = b"yanxu.platform.window";
 const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
+const PLATFORM_MAJOR: i64 = 1;
+const PLATFORM_MINOR: i64 = 1;
 
 #[derive(Clone, Copy)]
 pub struct HostApi(pub NativeHost);
@@ -852,8 +854,8 @@ pub unsafe fn call(
 
 fn protocol_info() -> Data {
     Data::map([
-        ("平台主", Data::Integer(1)),
-        ("平台次", Data::Integer(0)),
+        ("平台主", Data::Integer(PLATFORM_MAJOR)),
+        ("平台次", Data::Integer(PLATFORM_MINOR)),
         ("事件主", Data::Integer(EVENT_MAJOR)),
         ("事件次", Data::Integer(EVENT_MINOR)),
         ("绘制主", Data::Integer(i64::from(protocol::DRAW_MAJOR))),
@@ -1485,6 +1487,14 @@ mod tests {
 
     #[test]
     fn protocol_and_capability_maps_are_versioned() {
+        assert_eq!(
+            protocol_info().as_map().unwrap()["平台主"],
+            Data::Integer(PLATFORM_MAJOR)
+        );
+        assert_eq!(
+            protocol_info().as_map().unwrap()["平台次"],
+            Data::Integer(PLATFORM_MINOR)
+        );
         assert_eq!(protocol_info().as_map().unwrap()["ABI"], Data::Integer(2));
         assert_eq!(
             protocol_info().as_map().unwrap()["事件次"],
@@ -1496,6 +1506,10 @@ mod tests {
         );
         assert_eq!(
             capabilities().as_map().unwrap()["原生窗口"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["状态故障恢复"],
             Data::Bool(true)
         );
     }
