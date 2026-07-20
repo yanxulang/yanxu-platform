@@ -1095,6 +1095,30 @@ fn window_snapshot(resource: &PlatformResource) -> Result<Data, &'static str> {
         ),
         ("已有帧", Data::Bool(!window.frame.is_empty())),
         ("待呈现帧", Data::Bool(window.frame_pending)),
+        (
+            "帧序号",
+            if window.frame_generation != 0 {
+                u64_data(window.frame_generation)
+            } else {
+                Data::Nil
+            },
+        ),
+        (
+            "待呈现帧序号",
+            if window.frame_pending {
+                u64_data(window.frame_generation)
+            } else {
+                Data::Nil
+            },
+        ),
+        (
+            "帧提交时间",
+            if window.frame_generation != 0 {
+                Data::Number(window.frame_submitted_at_seconds)
+            } else {
+                Data::Nil
+            },
+        ),
         ("帧字节", usize_data(window.frame.len())),
     ]))
 }
