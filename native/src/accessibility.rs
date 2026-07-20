@@ -16,6 +16,86 @@ pub const MAX_SEMANTIC_NODE_TEXT_BYTES: usize = 65_536;
 pub const MAX_SEMANTIC_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SEMANTIC_COORDINATE: f64 = 1_000_000.0;
 
+pub const SEMANTIC_ROLES: &[&str] = &[
+    "窗口",
+    "组",
+    "面板",
+    "控件",
+    "文字",
+    "标题",
+    "按钮",
+    "链接",
+    "复选框",
+    "单选框",
+    "切换",
+    "输入框",
+    "多行输入框",
+    "密码框",
+    "组合框",
+    "列表",
+    "列表项",
+    "树",
+    "树项",
+    "标签页",
+    "标签",
+    "菜单栏",
+    "菜单",
+    "菜单项",
+    "弹出层",
+    "对话框",
+    "滑块",
+    "进度条",
+    "滚动条",
+    "滚动容器",
+    "分割面板",
+    "工具栏",
+    "画布",
+    "图片",
+    "表格",
+    "行",
+    "单元格",
+    "分隔符",
+];
+
+pub const SEMANTIC_STATES: &[&str] = &[
+    "启用",
+    "可见",
+    "可聚焦",
+    "焦点",
+    "忙碌",
+    "只读",
+    "必填",
+    "无效",
+    "选中",
+    "当前",
+    "已检查",
+    "混合",
+    "展开",
+    "多选",
+    "模态",
+    "按下",
+    "方向",
+    "级别",
+];
+
+pub const SEMANTIC_ACTIONS: &[&str] = &[
+    "聚焦",
+    "点击",
+    "设置值",
+    "选择",
+    "取消选择",
+    "复制",
+    "剪切",
+    "粘贴",
+    "展开",
+    "折叠",
+    "增加",
+    "减少",
+    "滚动",
+    "滚动到",
+    "显示菜单",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessibilitySource {
     AssistiveTechnology,
@@ -666,47 +746,7 @@ fn semantic_children(
 }
 
 fn valid_role(role: &str) -> bool {
-    matches!(
-        role,
-        "窗口"
-            | "组"
-            | "面板"
-            | "控件"
-            | "文字"
-            | "标题"
-            | "按钮"
-            | "链接"
-            | "复选框"
-            | "单选框"
-            | "切换"
-            | "输入框"
-            | "多行输入框"
-            | "密码框"
-            | "组合框"
-            | "列表"
-            | "列表项"
-            | "树"
-            | "树项"
-            | "标签页"
-            | "标签"
-            | "菜单栏"
-            | "菜单"
-            | "菜单项"
-            | "弹出层"
-            | "对话框"
-            | "滑块"
-            | "进度条"
-            | "滚动条"
-            | "滚动容器"
-            | "分割面板"
-            | "工具栏"
-            | "画布"
-            | "图片"
-            | "表格"
-            | "行"
-            | "单元格"
-            | "分隔符"
-    )
+    SEMANTIC_ROLES.contains(&role)
 }
 
 fn form_role(role: &str) -> bool {
@@ -826,6 +866,20 @@ mod tests {
         assert!(tree.node(2).unwrap().actions.contains("点击"));
         assert_eq!(tree.root().id(), 1);
         assert_eq!(SemanticTree::validate(&tree.to_data()).unwrap(), tree);
+    }
+
+    #[test]
+    fn negotiated_role_state_and_action_names_are_unique_and_bounded() {
+        for values in [SEMANTIC_ROLES, SEMANTIC_STATES, SEMANTIC_ACTIONS] {
+            let unique: BTreeSet<_> = values.iter().copied().collect();
+            assert_eq!(unique.len(), values.len());
+            assert!(
+                values
+                    .iter()
+                    .all(|value| !value.is_empty() && value.len() <= 32)
+            );
+        }
+        assert!(SEMANTIC_ROLES.iter().all(|role| valid_role(role)));
     }
 
     #[test]
