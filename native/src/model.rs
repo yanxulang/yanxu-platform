@@ -35,6 +35,7 @@ pub struct WindowState {
     pub redraw_requested: bool,
     pub frame: Vec<u8>,
     pub frame_generation: u64,
+    pub frame_submitted_at_seconds: f64,
     pub frame_pending: bool,
     pub ime_allowed: bool,
     pub ime_cursor_area: Option<[f64; 4]>,
@@ -64,6 +65,7 @@ impl Default for WindowState {
             redraw_requested: true,
             frame: Vec::new(),
             frame_generation: 0,
+            frame_submitted_at_seconds: 0.0,
             frame_pending: false,
             ime_allowed: false,
             ime_cursor_area: None,
@@ -352,6 +354,7 @@ impl Model {
             let replaced_sequence = window.frame_pending.then_some(window.frame_generation);
             window.frame = frame;
             window.frame_generation = generation;
+            window.frame_submitted_at_seconds = submitted_at_seconds;
             window.frame_pending = true;
             window.redraw_requested = true;
             (generation, replaced_sequence)

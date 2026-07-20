@@ -390,7 +390,7 @@ impl Runner {
             return;
         };
         let size = native.window.inner_size();
-        let (frame, scale, generation) = {
+        let (frame, scale, generation, submitted_at_seconds) = {
             let mut model = self.model.lock_recover();
             let Ok(node) = model.get_mut(model_id) else {
                 return;
@@ -403,6 +403,7 @@ impl Runner {
                 window.frame.clone(),
                 window.scale_factor,
                 window.frame_generation,
+                window.frame_submitted_at_seconds,
             )
         };
         if size.width == 0 || size.height == 0 || frame.is_empty() {
@@ -450,9 +451,16 @@ impl Runner {
             self.model.lock_recover().record_frame_failure();
             self.fail("PLATFORM_PRESENT");
         } else {
+            let presented_at_seconds = monotonic_seconds();
             self.model
                 .lock_recover()
                 .record_frame_presented(model_id, generation);
+            self.push(frame_presented_event(
+                model_id,
+                generation,
+                submitted_at_seconds,
+                presented_at_seconds,
+            ));
         }
     }
 
@@ -903,6 +911,24 @@ fn close_request_events(model_id: u64, last_window: bool, time_seconds: f64) -> 
     events
 }
 
+fn frame_presented_event(
+    model_id: u64,
+    generation: u64,
+    submitted_at_seconds: f64,
+    presented_at_seconds: f64,
+) -> PlatformEvent {
+    let latency_milliseconds = ((presented_at_seconds - submitted_at_seconds).max(0.0)) * 1_000.0;
+    PlatformEvent::new(
+        EventKind::FramePresented,
+        Some(model_id),
+        presented_at_seconds,
+    )
+    .with("帧序号", i64::try_from(generation).unwrap_or(i64::MAX))
+    .with("提交时间", submitted_at_seconds)
+    .with("呈现时间", presented_at_seconds)
+    .with("延迟毫秒", latency_milliseconds)
+}
+
 impl ApplicationHandler for Runner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.refresh_environment(event_loop);
@@ -1238,5 +1264,20 @@ mod tests {
         let one_of_many = close_request_events(7, false, 1.0);
         assert_eq!(one_of_many.len(), 1);
         assert_eq!(one_of_many[0].kind, EventKind::WindowCloseRequested);
+    }
+
+    #[test]
+    fn reports_presented_frame_with_monotonic_latency() {
+        let event = frame_presented_event(7, 11, 1.25, 1.27).to_data();
+        let event = event.as_map().unwrap();
+        assert_eq!(event["类型"], Data::String("帧呈现".to_owned()));
+        assert_eq!(event["窗口"], Data::Integer(7));
+        assert_eq!(event["帧序号"], Data::Integer(11));
+        assert_eq!(event["提交时间"], Data::Number(1.25));
+        assert_eq!(event["呈现时间"], Data::Number(1.27));
+        let Data::Number(latency) = event["延迟毫秒"] else {
+            panic!("frame latency must be a number")
+        };
+        assert!((latency - 20.0).abs() < 1e-9);
     }
 }
