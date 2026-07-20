@@ -140,6 +140,17 @@ impl AccessibilityState {
             .ok_or(AccessibilityError::Node(id))?
             .focus_target(id)
     }
+
+    pub fn action_target(
+        &self,
+        id: i64,
+        action: &str,
+        argument: &Data,
+    ) -> Result<&SemanticNodeSummary, AccessibilityError> {
+        self.tree()
+            .ok_or(AccessibilityError::Node(id))?
+            .action_target(id, action, argument)
+    }
 }
 
 impl SemanticTree {
@@ -175,6 +186,28 @@ impl SemanticTree {
         } else {
             Err(AccessibilityError::Focus(id))
         }
+    }
+
+    pub fn action_target(
+        &self,
+        id: i64,
+        action: &str,
+        argument: &Data,
+    ) -> Result<&SemanticNodeSummary, AccessibilityError> {
+        let node = self.node(id).ok_or(AccessibilityError::Node(id))?;
+        if action.len() > 32
+            || action == "聚焦"
+            || !node.actions.contains(action)
+            || matches!(node.states.get("启用"), Some(Data::Bool(false)))
+            || matches!(node.states.get("可见"), Some(Data::Bool(false)))
+        {
+            return Err(AccessibilityError::Action(format!(
+                "{}.{}",
+                node.role, action
+            )));
+        }
+        validate_action_argument(&node.role, action, argument)?;
+        Ok(node)
     }
 
     #[must_use]
@@ -506,6 +539,87 @@ fn valid_action(action: &str, role: &str, states: &BTreeMap<String, Data>) -> bo
         "滚动到" => true,
         "显示菜单" => matches!(role, "按钮" | "输入框" | "多行输入框" | "密码框"),
         _ => false,
+    }
+}
+
+fn validate_action_argument(
+    role: &str,
+    action: &str,
+    argument: &Data,
+) -> Result<(), AccessibilityError> {
+    match action {
+        "设置值" => validate_set_value(role, argument),
+        "选择" if text_role(role) => validate_text_selection(argument),
+        "滚动" => validate_scroll(argument),
+        "点击" | "选择" | "取消选择" | "展开" | "折叠" | "增加" | "减少" | "滚动到" | "复制"
+        | "剪切" | "粘贴" | "显示菜单" => require_no_argument(argument),
+        _ => Err(AccessibilityError::Action(format!("{role}.{action}"))),
+    }
+}
+
+fn validate_set_value(role: &str, argument: &Data) -> Result<(), AccessibilityError> {
+    match (role, argument) {
+        ("输入框" | "多行输入框" | "密码框" | "组合框", Data::String(value))
+            if value.len() <= MAX_SEMANTIC_NODE_TEXT_BYTES =>
+        {
+            Ok(())
+        }
+        ("组合框", Data::Integer(_)) => Ok(()),
+        ("滑块" | "滚动条" | "分割面板", value)
+            if value.as_number().is_some_and(f64::is_finite) =>
+        {
+            Ok(())
+        }
+        _ => Err(AccessibilityError::Action(format!("{role}.设置值参数"))),
+    }
+}
+
+fn validate_text_selection(argument: &Data) -> Result<(), AccessibilityError> {
+    let Data::Map(range) = argument else {
+        return Err(AccessibilityError::Action("选择参数".to_owned()));
+    };
+    if range.len() != 2 || !range.contains_key("起") || !range.contains_key("终") {
+        return Err(AccessibilityError::Action("选择参数".to_owned()));
+    }
+    let (Some(Data::Integer(start)), Some(Data::Integer(end))) = (range.get("起"), range.get("终"))
+    else {
+        return Err(AccessibilityError::Action("选择参数".to_owned()));
+    };
+    if *start >= 0 && start <= end && *end <= MAX_SEMANTIC_NODE_TEXT_BYTES as i64 {
+        Ok(())
+    } else {
+        Err(AccessibilityError::Action("选择参数".to_owned()))
+    }
+}
+
+fn validate_scroll(argument: &Data) -> Result<(), AccessibilityError> {
+    let Data::Map(delta) = argument else {
+        return Err(AccessibilityError::Action("滚动参数".to_owned()));
+    };
+    if delta.is_empty()
+        || delta.len() > 2
+        || delta
+            .keys()
+            .any(|name| !matches!(name.as_str(), "横向" | "纵向"))
+    {
+        return Err(AccessibilityError::Action("滚动参数".to_owned()));
+    }
+    if delta.values().all(|value| {
+        value
+            .as_number()
+            .is_some_and(|number| number.is_finite() && number.abs() <= MAX_SEMANTIC_COORDINATE)
+    }) {
+        Ok(())
+    } else {
+        Err(AccessibilityError::Action("滚动参数".to_owned()))
+    }
+}
+
+fn require_no_argument(argument: &Data) -> Result<(), AccessibilityError> {
+    if matches!(argument, Data::Nil) {
+        Ok(())
+    } else {
+        Err(AccessibilityError::Action("操作不接受参数".to_owned()))
     }
 }
 
@@ -897,6 +1011,79 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "PLATFORM_ACCESSIBILITY_FOCUS"
+        );
+    }
+
+    #[test]
+    fn action_requests_match_advertised_operations_and_argument_shapes() {
+        let button = node(
+            1,
+            "按钮",
+            BTreeMap::from([("启用".to_owned(), Data::Bool(true))]),
+            vec!["点击"],
+            Vec::new(),
+        );
+        let tree = SemanticTree::validate(&button).unwrap();
+        assert!(tree.action_target(1, "点击", &Data::Nil).is_ok());
+        assert_eq!(
+            tree.action_target(1, "点击", &Data::Bool(true))
+                .unwrap_err()
+                .code(),
+            "PLATFORM_ACCESSIBILITY_ACTION"
+        );
+        assert_eq!(
+            tree.action_target(1, "展开", &Data::Nil)
+                .unwrap_err()
+                .code(),
+            "PLATFORM_ACCESSIBILITY_ACTION"
+        );
+
+        let input = node(
+            2,
+            "输入框",
+            BTreeMap::new(),
+            vec!["设置值", "选择"],
+            Vec::new(),
+        );
+        let tree = SemanticTree::validate(&input).unwrap();
+        assert!(
+            tree.action_target(2, "设置值", &Data::String("新值".to_owned()))
+                .is_ok()
+        );
+        assert!(
+            tree.action_target(
+                2,
+                "选择",
+                &Data::map([("起", Data::Integer(0)), ("终", Data::Integer(3))]),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            tree.action_target(
+                2,
+                "选择",
+                &Data::map([("起", Data::Integer(4)), ("终", Data::Integer(3))]),
+            )
+            .unwrap_err()
+            .code(),
+            "PLATFORM_ACCESSIBILITY_ACTION"
+        );
+
+        let list = node(3, "列表", BTreeMap::new(), vec!["滚动"], Vec::new());
+        let tree = SemanticTree::validate(&list).unwrap();
+        assert!(
+            tree.action_target(3, "滚动", &Data::map([("纵向", Data::Number(120.0))]),)
+                .is_ok()
+        );
+        assert_eq!(
+            tree.action_target(
+                3,
+                "滚动",
+                &Data::map([("纵向", Data::Number(f64::INFINITY))]),
+            )
+            .unwrap_err()
+            .code(),
+            "PLATFORM_ACCESSIBILITY_ACTION"
         );
     }
 }

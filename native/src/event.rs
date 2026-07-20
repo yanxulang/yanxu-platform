@@ -27,6 +27,7 @@ pub enum EventKind {
     RedrawRequested,
     FramePresented,
     AccessibilityFocusRequested,
+    AccessibilityActionRequested,
     PointerEntered,
     PointerLeft,
     PointerMoved,
@@ -71,6 +72,7 @@ impl EventKind {
             Self::RedrawRequested => "需要重绘",
             Self::FramePresented => "帧呈现",
             Self::AccessibilityFocusRequested => "无障碍焦点请求",
+            Self::AccessibilityActionRequested => "无障碍动作请求",
             Self::PointerEntered => "指针进入",
             Self::PointerLeft => "指针离开",
             Self::PointerMoved => "指针移动",
@@ -378,6 +380,7 @@ mod tests {
             EventKind::RedrawRequested,
             EventKind::FramePresented,
             EventKind::AccessibilityFocusRequested,
+            EventKind::AccessibilityActionRequested,
             EventKind::PointerEntered,
             EventKind::PointerLeft,
             EventKind::PointerMoved,
@@ -401,7 +404,7 @@ mod tests {
             EventKind::MonitorsChanged,
             EventKind::Timer,
         ];
-        assert_eq!(kinds.len(), 38);
+        assert_eq!(kinds.len(), 39);
         assert!(kinds.iter().all(|kind| !kind.name().is_empty()));
     }
 

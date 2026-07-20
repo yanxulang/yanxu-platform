@@ -487,6 +487,40 @@ impl Model {
         Ok(())
     }
 
+    pub fn request_accessibility_action(
+        &mut self,
+        window_id: u64,
+        node_id: i64,
+        action: &str,
+        argument: Data,
+        source: AccessibilitySource,
+        time_seconds: f64,
+    ) -> Result<(), AccessibilityEventError> {
+        let revision = {
+            let node = self.get(window_id)?;
+            let ResourceState::Window(window) = &node.state else {
+                return Err(ModelError::Kind(window_id).into());
+            };
+            window
+                .accessibility
+                .action_target(node_id, action, &argument)?;
+            window.accessibility.revision()
+        };
+        self.events.push(
+            PlatformEvent::new(
+                EventKind::AccessibilityActionRequested,
+                Some(window_id),
+                time_seconds,
+            )
+            .with("节点", Data::Integer(node_id))
+            .with("树修订", Data::Integer(revision))
+            .with("动作", action)
+            .with("参数", argument)
+            .with("来源", source.name()),
+        )?;
+        Ok(())
+    }
+
     #[must_use]
     pub const fn frame_metrics(&self) -> FrameMetrics {
         self.frame_metrics
@@ -814,6 +848,90 @@ mod tests {
         };
         assert_eq!(state.accessibility.focused(), None);
         assert!(model.events.is_empty());
+    }
+
+    #[test]
+    fn queues_bounded_accessibility_actions_with_validated_arguments() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let tree = Data::map([
+            ("编号", Data::Integer(7)),
+            ("角色", Data::String("按钮".to_owned())),
+            ("名称", Data::String("保存".to_owned())),
+            (
+                "状态",
+                Data::map([("启用", Data::Bool(true)), ("可见", Data::Bool(true))]),
+            ),
+            ("操作", Data::Array(vec![Data::String("点击".to_owned())])),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 80.into(), 30.into()]),
+            ),
+        ]);
+        let ResourceState::Window(state) = &mut model.get_mut(window).unwrap().state else {
+            panic!("window state expected")
+        };
+        state
+            .accessibility
+            .replace(Some(SemanticTree::validate(&tree).unwrap()))
+            .unwrap();
+        model
+            .request_accessibility_action(
+                window,
+                7,
+                "点击",
+                Data::Nil,
+                AccessibilitySource::AssistiveTechnology,
+                4.0,
+            )
+            .unwrap();
+        let batch = model.events.take_data().unwrap();
+        let batch = batch.as_map().unwrap();
+        let Data::Array(events) = &batch["事件"] else {
+            panic!("events expected")
+        };
+        let event = events[0].as_map().unwrap();
+        assert_eq!(event["类型"], Data::String("无障碍动作请求".to_owned()));
+        assert_eq!(event["节点"], Data::Integer(7));
+        assert_eq!(event["树修订"], Data::Integer(1));
+        assert_eq!(event["动作"], Data::String("点击".to_owned()));
+        assert_eq!(event["参数"], Data::Nil);
+        assert_eq!(event["来源"], Data::String("辅助技术".to_owned()));
+
+        assert_eq!(
+            model
+                .request_accessibility_action(
+                    window,
+                    7,
+                    "点击",
+                    Data::Bool(true),
+                    AccessibilitySource::AssistiveTechnology,
+                    4.5,
+                )
+                .unwrap_err()
+                .code(),
+            "PLATFORM_ACCESSIBILITY_ACTION"
+        );
+        assert!(model.events.is_empty());
+
+        model.events = EventBatcher::with_capacity(0);
+        assert_eq!(
+            model
+                .request_accessibility_action(
+                    window,
+                    7,
+                    "点击",
+                    Data::Nil,
+                    AccessibilitySource::AssistiveTechnology,
+                    5.0,
+                )
+                .unwrap_err()
+                .code(),
+            "PLATFORM_QUEUE_FULL"
+        );
     }
 
     #[test]
