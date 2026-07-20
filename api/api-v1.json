@@ -677,6 +677,41 @@
           "async": false,
           "documentation": "",
           "kind": "method",
+          "name": "更新无障碍",
+          "parameters": [
+            {
+              "name": "树",
+              "type": "典"
+            }
+          ],
+          "result": "典",
+          "signature": "法（典）：典",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "清除无障碍",
+          "parameters": [],
+          "result": "典",
+          "signature": "法（）：典",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "无障碍查询",
+          "parameters": [],
+          "result": "典",
+          "signature": "法（）：典",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
           "name": "配置输入法",
           "parameters": [
             {

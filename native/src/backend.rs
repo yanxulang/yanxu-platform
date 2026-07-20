@@ -1,6 +1,7 @@
 //! ABI 操作到无句柄平台模型的映射。
 
 use crate::abi::{self, NativeError, NativeHost};
+use crate::accessibility::{AccessibilityState, SemanticTree};
 use crate::bridge::{encode_data, free_value};
 use crate::data::Data;
 use crate::event::{EVENT_MAJOR, EVENT_MINOR, EventKind, PlatformEvent};
@@ -194,6 +195,8 @@ pub enum Operation {
     ClipboardReadImage,
     ClipboardWriteImage,
     SubmitFrameFeedback,
+    AccessibilityUpdate,
+    AccessibilityQuery,
 }
 
 impl Operation {
@@ -237,6 +240,8 @@ impl Operation {
             35 => Self::ClipboardReadImage,
             36 => Self::ClipboardWriteImage,
             37 => Self::SubmitFrameFeedback,
+            38 => Self::AccessibilityUpdate,
+            39 => Self::AccessibilityQuery,
             _ => return None,
         })
     }
@@ -389,6 +394,47 @@ pub unsafe fn call(
             let bytes = bytes(&arguments[1])?;
             let (count, submission) = submit_frame(resource, bytes)?;
             Ok(Output::Value(frame_submission_data(count, submission)))
+        }
+        Operation::AccessibilityUpdate => {
+            require_count(arguments, 2)?;
+            let (_, resource) = unsafe { resource(arguments, 0, host, ResourceKind::Window) }?;
+            let tree = match &arguments[1] {
+                Data::Nil => None,
+                value => Some(SemanticTree::validate(value).map_err(|error| error.code())?),
+            };
+            let mut model = resource.model.lock_recover();
+            let node = model
+                .get_mut(resource.id)
+                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+            let ResourceState::Window(window) = &mut node.state else {
+                return Err("PLATFORM_RESOURCE_TYPE");
+            };
+            let changed = window
+                .accessibility
+                .replace(tree)
+                .map_err(|error| error.code())?;
+            let result = accessibility_state_data(&window.accessibility, Some(changed));
+            drop(model);
+            if changed {
+                let _ = crate::windowing::wake(resource.host.0.event_loop_id);
+                resource.host.wake();
+            }
+            Ok(Output::Value(result))
+        }
+        Operation::AccessibilityQuery => {
+            require_count(arguments, 1)?;
+            let (_, resource) = unsafe { resource(arguments, 0, host, ResourceKind::Window) }?;
+            let model = resource.model.lock_recover();
+            let node = model
+                .get(resource.id)
+                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+            let ResourceState::Window(window) = &node.state else {
+                return Err("PLATFORM_RESOURCE_TYPE");
+            };
+            Ok(Output::Value(accessibility_state_data(
+                &window.accessibility,
+                None,
+            )))
         }
         Operation::InspectDraw => {
             require_count(arguments, 1)?;
@@ -907,6 +953,27 @@ fn frame_submission_data(count: i64, submission: FrameSubmission) -> Data {
         ),
         ("提交时间", Data::Number(submission.submitted_at_seconds)),
     ])
+}
+
+fn accessibility_state_data(state: &AccessibilityState, changed: Option<bool>) -> Data {
+    let mut result = BTreeMap::from([
+        ("修订".to_owned(), Data::Integer(state.revision())),
+        ("节点数".to_owned(), usize_data(state.node_count())),
+        ("文字字节".to_owned(), usize_data(state.text_bytes())),
+        (
+            "焦点".to_owned(),
+            state.focused().map_or(Data::Nil, Data::Integer),
+        ),
+    ]);
+    if let Some(changed) = changed {
+        result.insert("变化".to_owned(), Data::Bool(changed));
+    } else {
+        result.insert(
+            "树".to_owned(),
+            state.tree().map_or(Data::Nil, SemanticTree::to_data),
+        );
+    }
+    Data::Map(result)
 }
 
 fn capabilities() -> Data {
@@ -1775,6 +1842,36 @@ mod tests {
             capabilities().as_map().unwrap()["剪贴板图片格式"],
             Data::Array(vec![Data::String("RGBA8".to_owned())])
         );
+    }
+
+    #[test]
+    fn accessibility_updates_return_metadata_and_queries_return_the_tree() {
+        let tree = Data::map([
+            ("编号", Data::Integer(1)),
+            ("角色", Data::String("面板".to_owned())),
+            ("名称", Data::String("根".to_owned())),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 320.into(), 200.into()]),
+            ),
+        ]);
+        let mut state = AccessibilityState::default();
+        assert!(
+            state
+                .replace(Some(SemanticTree::validate(&tree).unwrap()))
+                .unwrap()
+        );
+        let update = accessibility_state_data(&state, Some(true));
+        let update = update.as_map().unwrap();
+        assert_eq!(update["修订"], Data::Integer(1));
+        assert_eq!(update["节点数"], Data::Integer(1));
+        assert_eq!(update["变化"], Data::Bool(true));
+        assert!(!update.contains_key("树"));
+
+        let query = accessibility_state_data(&state, None);
+        let query = query.as_map().unwrap();
+        assert_eq!(query["树"], state.tree().unwrap().to_data());
+        assert!(!query.contains_key("变化"));
     }
 
     #[test]

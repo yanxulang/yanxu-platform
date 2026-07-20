@@ -4,6 +4,7 @@ use crate::data::Data;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::sync::Arc;
 
 pub const ACCESSIBILITY_MAJOR: i64 = 1;
 pub const ACCESSIBILITY_MINOR: i64 = 0;
@@ -75,6 +76,52 @@ pub struct SemanticTree {
     focused: Option<i64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AccessibilityState {
+    revision: i64,
+    tree: Option<Arc<SemanticTree>>,
+}
+
+impl AccessibilityState {
+    pub fn replace(&mut self, tree: Option<SemanticTree>) -> Result<bool, AccessibilityError> {
+        if self.tree.as_deref() == tree.as_ref() {
+            return Ok(false);
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(AccessibilityError::Revision)?;
+        self.revision = revision;
+        self.tree = tree.map(Arc::new);
+        Ok(true)
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> i64 {
+        self.revision
+    }
+
+    #[must_use]
+    pub fn tree(&self) -> Option<&SemanticTree> {
+        self.tree.as_deref()
+    }
+
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.tree().map_or(0, SemanticTree::node_count)
+    }
+
+    #[must_use]
+    pub fn text_bytes(&self) -> usize {
+        self.tree().map_or(0, SemanticTree::text_bytes)
+    }
+
+    #[must_use]
+    pub fn focused(&self) -> Option<i64> {
+        self.tree().and_then(SemanticTree::focused)
+    }
+}
+
 impl SemanticTree {
     pub fn validate(value: &Data) -> Result<Self, AccessibilityError> {
         let mut context = ValidationContext::default();
@@ -127,6 +174,7 @@ pub enum AccessibilityError {
     State(String),
     Action(String),
     Focus(i64),
+    Revision,
 }
 
 impl AccessibilityError {
@@ -140,6 +188,7 @@ impl AccessibilityError {
             Self::State(_) => "PLATFORM_ACCESSIBILITY_STATE",
             Self::Action(_) => "PLATFORM_ACCESSIBILITY_ACTION",
             Self::Focus(_) => "PLATFORM_ACCESSIBILITY_FOCUS",
+            Self::Revision => "PLATFORM_ACCESSIBILITY_REVISION",
         }
     }
 }
@@ -154,6 +203,7 @@ impl Display for AccessibilityError {
             Self::State(state) => write!(formatter, "无障碍状态无效：{state}"),
             Self::Action(action) => write!(formatter, "无障碍操作无效：{action}"),
             Self::Focus(id) => write!(formatter, "无障碍焦点状态无效：{id}"),
+            Self::Revision => formatter.write_str("无障碍树修订已耗尽"),
         }
     }
 }
@@ -748,5 +798,29 @@ mod tests {
             SemanticTree::validate(&too_deep).unwrap_err().code(),
             "PLATFORM_ACCESSIBILITY_LIMIT"
         );
+    }
+
+    #[test]
+    fn window_state_deduplicates_updates_and_clears_idempotently() {
+        let value = node(1, "面板", BTreeMap::new(), Vec::new(), Vec::new());
+        let mut state = AccessibilityState::default();
+        assert!(
+            state
+                .replace(Some(SemanticTree::validate(&value).unwrap()))
+                .unwrap()
+        );
+        assert_eq!(state.revision(), 1);
+        assert_eq!(state.node_count(), 1);
+        assert!(
+            !state
+                .replace(Some(SemanticTree::validate(&value).unwrap()))
+                .unwrap()
+        );
+        assert_eq!(state.revision(), 1);
+        assert!(state.replace(None).unwrap());
+        assert_eq!(state.revision(), 2);
+        assert_eq!(state.node_count(), 0);
+        assert!(!state.replace(None).unwrap());
+        assert_eq!(state.revision(), 2);
     }
 }

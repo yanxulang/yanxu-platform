@@ -1,5 +1,6 @@
 //! 无平台句柄的应用和资源所有权模型。
 
+use crate::accessibility::AccessibilityState;
 use crate::event::EventBatcher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -42,6 +43,7 @@ pub struct WindowState {
     pub ime_purpose: String,
     pub cursor: String,
     pub cursor_visible: bool,
+    pub accessibility: AccessibilityState,
 }
 
 impl Default for WindowState {
@@ -72,6 +74,7 @@ impl Default for WindowState {
             ime_purpose: "普通".to_owned(),
             cursor: "默认".to_owned(),
             cursor_visible: true,
+            accessibility: AccessibilityState::default(),
         }
     }
 }
