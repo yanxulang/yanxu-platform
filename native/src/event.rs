@@ -262,7 +262,8 @@ fn accumulate_wheel(
     previous: &mut PlatformEvent,
     event: &PlatformEvent,
 ) -> Result<(), EventQueueError> {
-    for name in ["横滚", "纵滚"] {
+    let mut totals = [0.0; 2];
+    for (index, name) in ["横滚", "纵滚"].into_iter().enumerate() {
         let old = previous
             .fields
             .get(name)
@@ -277,6 +278,9 @@ fn accumulate_wheel(
         if !total.is_finite() {
             return Err(EventQueueError::InvalidNumber);
         }
+        totals[index] = total;
+    }
+    for (name, total) in ["横滚", "纵滚"].into_iter().zip(totals) {
         previous.fields.insert(name.to_owned(), Data::Number(total));
     }
     for (name, value) in &event.fields {
@@ -382,6 +386,32 @@ mod tests {
         let event = events(&batch)[0].as_map().unwrap();
         assert_eq!(event["横滚"], Data::Number(0.5));
         assert_eq!(event["纵滚"], Data::Number(5.0));
+    }
+
+    #[test]
+    fn rejected_wheel_accumulation_keeps_the_previous_event_unchanged() {
+        let mut batcher = EventBatcher::default();
+        batcher
+            .push(
+                PlatformEvent::new(EventKind::Wheel, Some(4), 1.0)
+                    .with("横滚", 1.0)
+                    .with("纵滚", f64::MAX),
+            )
+            .unwrap();
+        assert_eq!(
+            batcher.push(
+                PlatformEvent::new(EventKind::Wheel, Some(4), 2.0)
+                    .with("横滚", 2.0)
+                    .with("纵滚", f64::MAX),
+            ),
+            Err(EventQueueError::InvalidNumber)
+        );
+
+        let batch = batcher.take_data().unwrap();
+        let event = events(&batch)[0].as_map().unwrap();
+        assert_eq!(event["横滚"], Data::Number(1.0));
+        assert_eq!(event["纵滚"], Data::Number(f64::MAX));
+        assert_eq!(event["序号"], Data::Integer(1));
     }
 
     #[test]
