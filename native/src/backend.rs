@@ -373,14 +373,12 @@ pub unsafe fn call(
             let frame = protocol::decode(bytes).map_err(draw_error_code)?;
             let count = i64::try_from(frame.commands.len()).map_err(|_| "PLATFORM_DRAW_LIMIT")?;
             let mut model = resource.model.lock_recover();
-            let node = model
-                .get_mut(resource.id)
-                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
-            let ResourceState::Window(window) = &mut node.state else {
-                return Err("PLATFORM_RESOURCE_TYPE");
-            };
-            window.frame = bytes.to_vec();
-            window.redraw_requested = true;
+            model
+                .submit_frame(resource.id, bytes.to_vec())
+                .map_err(frame_model_error)?;
+            drop(model);
+            let _ = crate::windowing::wake(host.0.event_loop_id);
+            host.wake();
             Ok(Output::Value(Data::Integer(count)))
         }
         Operation::InspectDraw => {
@@ -1310,6 +1308,17 @@ fn draw_error_code(error: protocol::ProtocolError) -> &'static str {
         protocol::ProtocolError::Utf8 => "PLATFORM_DRAW_UTF8",
         protocol::ProtocolError::NonFinite => "PLATFORM_DRAW_NUMBER",
         _ => "PLATFORM_DRAW_CORRUPT",
+    }
+}
+
+const fn frame_model_error(error: crate::model::ModelError) -> &'static str {
+    match error {
+        crate::model::ModelError::Missing(_) => "PLATFORM_RESOURCE_CLOSED",
+        crate::model::ModelError::Kind(_) => "PLATFORM_RESOURCE_TYPE",
+        crate::model::ModelError::FrameSequence => "PLATFORM_FRAME_SEQUENCE",
+        crate::model::ModelError::Parent(_) | crate::model::ModelError::Overflow => {
+            "PLATFORM_RESOURCE"
+        }
     }
 }
 

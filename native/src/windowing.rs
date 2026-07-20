@@ -390,7 +390,7 @@ impl Runner {
             return;
         };
         let size = native.window.inner_size();
-        let (frame, scale) = {
+        let (frame, scale, generation) = {
             let mut model = self.model.lock_recover();
             let Ok(node) = model.get_mut(model_id) else {
                 return;
@@ -399,7 +399,11 @@ impl Runner {
                 return;
             };
             window.redraw_requested = false;
-            (window.frame.clone(), window.scale_factor)
+            (
+                window.frame.clone(),
+                window.scale_factor,
+                window.frame_generation,
+            )
         };
         if size.width == 0 || size.height == 0 || frame.is_empty() {
             return;
@@ -413,10 +417,12 @@ impl Runner {
                 }) {
                 Ok(rendered) => rendered,
                 Err(_) => {
+                    self.model.lock_recover().record_frame_failure();
                     self.fail("PLATFORM_RENDER");
                     return;
                 }
             };
+        self.model.lock_recover().record_frame_rendered();
         let Some(width) = NonZeroU32::new(rendered.width()) else {
             return;
         };
@@ -424,21 +430,29 @@ impl Runner {
             return;
         };
         if native.surface.resize(width, height).is_err() {
+            self.model.lock_recover().record_frame_failure();
             self.fail("PLATFORM_PRESENT");
             return;
         }
         let pixels = rendered.xrgb();
         let Ok(mut buffer) = native.surface.buffer_mut() else {
+            self.model.lock_recover().record_frame_failure();
             self.fail("PLATFORM_PRESENT");
             return;
         };
         if buffer.len() != pixels.len() {
+            self.model.lock_recover().record_frame_failure();
             self.fail("PLATFORM_PRESENT");
             return;
         }
         buffer.copy_from_slice(&pixels);
         if buffer.present().is_err() {
+            self.model.lock_recover().record_frame_failure();
             self.fail("PLATFORM_PRESENT");
+        } else {
+            self.model
+                .lock_recover()
+                .record_frame_presented(model_id, generation);
         }
     }
 
