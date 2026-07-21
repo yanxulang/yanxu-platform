@@ -237,27 +237,27 @@ jobs:
           grep -F '29808592375' docs/ARTIFACT_PROVENANCE.md
           grep -F '3d1dae4b4546762902e99d37b517f383c8a7a521' docs/ARTIFACT_PROVENANCE.md
           jq -e \
-            '.schema == 1 and .package_version == "0.9.0" and
+            '.schema == 1 and .package_version == "1.0.0" and
              .profile == "release" and .os == "linux" and .arch == "x86_64" and
              .passed == true and (.cases | length == 4) and
              all(.cases[]; .passed == true)' \
             performance/yanxu-platform-performance-budget.json
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
-            -czf yanxu-platform-0.9.0-six-targets.tar.gz \
+            -czf yanxu-platform-1.0.0-six-targets.tar.gz \
             .gitattributes .github .gitignore src native vendor api docs examples tests dist scripts \
             Cargo.toml Cargo.lock deny.toml 言序.toml 言序.toml.in \
             README.md CHANGELOG.md SECURITY.md LICENSE-MIT LICENSE-APACHE
-          sha256sum yanxu-platform-0.9.0-six-targets.tar.gz \
-            > yanxu-platform-0.9.0-six-targets.sha256
-          cp 言序.toml yanxu-platform-0.9.0.toml
+          sha256sum yanxu-platform-1.0.0-six-targets.tar.gz \
+            > yanxu-platform-1.0.0-six-targets.sha256
+          cp 言序.toml yanxu-platform-1.0.0.toml
           cp performance/yanxu-platform-performance-budget.json \
-            yanxu-platform-0.9.0-performance.json
+            yanxu-platform-1.0.0-performance.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: yanxu-platform-six-targets
           path: |
-            yanxu-platform-0.9.0-six-targets.tar.gz
-            yanxu-platform-0.9.0-six-targets.sha256
-            yanxu-platform-0.9.0.toml
-            yanxu-platform-0.9.0-performance.json
+            yanxu-platform-1.0.0-six-targets.tar.gz
+            yanxu-platform-1.0.0-six-targets.sha256
+            yanxu-platform-1.0.0.toml
+            yanxu-platform-1.0.0-performance.json
           if-no-files-found: error

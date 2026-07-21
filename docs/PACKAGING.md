@@ -46,7 +46,7 @@ Clippy。`assemble` 作业只有在当前提交的六目标重新构建、最低
 导出；Release 则始终复用标签中固定且有成功运行来源的字节，确保 Git 包、清单摘要和
 Release 归档完全一致。
 
-归档名为`yanxu-platform-0.9.0-six-targets.tar.gz`，支持：
+归档名为`yanxu-platform-1.0.0-six-targets.tar.gz`，支持：
 
 ```text
 windows/x64, windows/arm64
@@ -85,7 +85,7 @@ Release 工作流不重新编译。维护者先把版本提交合并到主分支
 - 工作流名确为`CI`且结论为 success；
 - 下载的是该 run 的`yanxu-platform-six-targets`；
 - 上传前重新校验归档 SHA-256；
-- 性能报告属于 0.9.0、来自 Linux x86-64 Release 且四项预算全部通过；
+- 性能报告属于 1.0.0、来自 Linux x86-64 Release 且四项预算全部通过；
 - `gh release create --verify-tag`成功。
 
 因此本地临时构建不能直接成为正式 Release。发布说明必须同步 `CHANGELOG.md`、兼容政策、
