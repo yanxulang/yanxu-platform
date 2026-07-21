@@ -8,6 +8,14 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::time::{Duration, Instant};
 
+pub const MAX_APPLICATION_RESOURCES: usize = 4_096;
+pub const MAX_APPLICATION_WINDOWS: usize = 64;
+pub const MAX_APPLICATION_TIMERS: usize = 2_048;
+pub const MAX_APPLICATION_IMAGES: usize = 256;
+pub const MAX_APPLICATION_FONTS: usize = 64;
+pub const MAX_APPLICATION_IMAGE_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_APPLICATION_FONT_BYTES: usize = 128 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
     Application,
@@ -15,6 +23,106 @@ pub enum ResourceKind {
     Timer,
     Image,
     Font,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    pub resources: usize,
+    pub windows: usize,
+    pub timers: usize,
+    pub images: usize,
+    pub fonts: usize,
+    pub image_bytes: usize,
+    pub font_bytes: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            resources: MAX_APPLICATION_RESOURCES,
+            windows: MAX_APPLICATION_WINDOWS,
+            timers: MAX_APPLICATION_TIMERS,
+            images: MAX_APPLICATION_IMAGES,
+            fonts: MAX_APPLICATION_FONTS,
+            image_bytes: MAX_APPLICATION_IMAGE_BYTES,
+            font_bytes: MAX_APPLICATION_FONT_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResourceUsage {
+    pub resources: usize,
+    pub windows: usize,
+    pub timers: usize,
+    pub images: usize,
+    pub fonts: usize,
+    pub image_bytes: usize,
+    pub font_bytes: usize,
+}
+
+impl ResourceUsage {
+    fn checked_add(self, other: Self) -> Option<Self> {
+        Some(Self {
+            resources: self.resources.checked_add(other.resources)?,
+            windows: self.windows.checked_add(other.windows)?,
+            timers: self.timers.checked_add(other.timers)?,
+            images: self.images.checked_add(other.images)?,
+            fonts: self.fonts.checked_add(other.fonts)?,
+            image_bytes: self.image_bytes.checked_add(other.image_bytes)?,
+            font_bytes: self.font_bytes.checked_add(other.font_bytes)?,
+        })
+    }
+
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        Some(Self {
+            resources: self.resources.checked_sub(other.resources)?,
+            windows: self.windows.checked_sub(other.windows)?,
+            timers: self.timers.checked_sub(other.timers)?,
+            images: self.images.checked_sub(other.images)?,
+            fonts: self.fonts.checked_sub(other.fonts)?,
+            image_bytes: self.image_bytes.checked_sub(other.image_bytes)?,
+            font_bytes: self.font_bytes.checked_sub(other.font_bytes)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaKind {
+    Resources,
+    Windows,
+    Timers,
+    Images,
+    Fonts,
+    ImageBytes,
+    FontBytes,
+}
+
+impl QuotaKind {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Resources => "PLATFORM_QUOTA_RESOURCES",
+            Self::Windows => "PLATFORM_QUOTA_WINDOWS",
+            Self::Timers => "PLATFORM_QUOTA_TIMERS",
+            Self::Images => "PLATFORM_QUOTA_IMAGES",
+            Self::Fonts => "PLATFORM_QUOTA_FONTS",
+            Self::ImageBytes => "PLATFORM_QUOTA_IMAGE_BYTES",
+            Self::FontBytes => "PLATFORM_QUOTA_FONT_BYTES",
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Resources => "资源总数",
+            Self::Windows => "窗口数",
+            Self::Timers => "计时器数",
+            Self::Images => "图片数",
+            Self::Fonts => "字体数",
+            Self::ImageBytes => "图片字节",
+            Self::FontBytes => "字体字节",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +235,27 @@ impl ResourceState {
             Self::Font { .. } => ResourceKind::Font,
         }
     }
+
+    fn usage(&self) -> ResourceUsage {
+        let mut usage = ResourceUsage {
+            resources: 1,
+            ..ResourceUsage::default()
+        };
+        match self {
+            Self::Application { .. } => {}
+            Self::Window(_) => usage.windows = 1,
+            Self::Timer(_) => usage.timers = 1,
+            Self::Image { rgba, .. } => {
+                usage.images = 1;
+                usage.image_bytes = rgba.len();
+            }
+            Self::Font { bytes, .. } => {
+                usage.fonts = 1;
+                usage.font_bytes = bytes.as_ref().map_or(0, Vec::len);
+            }
+        }
+        usage
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +322,7 @@ pub enum ModelError {
     Kind(u64),
     FrameSequence,
     Overflow,
+    Quota(QuotaKind),
 }
 
 impl Display for ModelError {
@@ -203,6 +333,7 @@ impl Display for ModelError {
             Self::Kind(id) => write!(formatter, "平台资源 {id} 类型不允许此操作"),
             Self::FrameSequence => formatter.write_str("平台帧序号已耗尽"),
             Self::Overflow => formatter.write_str("平台资源编号已耗尽"),
+            Self::Quota(kind) => write!(formatter, "平台应用{}配额已耗尽", kind.name()),
         }
     }
 }
@@ -222,6 +353,7 @@ impl AccessibilityModelError {
         match self {
             Self::Model(ModelError::Missing(_)) => "PLATFORM_RESOURCE_CLOSED",
             Self::Model(ModelError::Kind(_)) => "PLATFORM_RESOURCE_TYPE",
+            Self::Model(ModelError::Quota(kind)) => kind.code(),
             Self::Model(_) => "PLATFORM_RESOURCE",
             Self::Accessibility(error) => error.code(),
             Self::Queue(EventQueueError::Full) => "PLATFORM_QUEUE_FULL",
@@ -264,6 +396,8 @@ impl From<EventQueueError> for AccessibilityModelError {
 pub struct Model {
     next_id: u64,
     resources: BTreeMap<u64, ResourceNode>,
+    resource_limits: ResourceLimits,
+    resource_usage: ResourceUsage,
     resource_metrics: ResourceMetrics,
     frame_metrics: FrameMetrics,
     accessibility_metrics: AccessibilityMetrics,
@@ -279,6 +413,8 @@ impl Default for Model {
         Self {
             next_id: 1,
             resources: BTreeMap::new(),
+            resource_limits: ResourceLimits::default(),
+            resource_usage: ResourceUsage::default(),
             resource_metrics: ResourceMetrics::default(),
             frame_metrics: FrameMetrics::default(),
             accessibility_metrics: AccessibilityMetrics::default(),
@@ -292,6 +428,14 @@ impl Default for Model {
 }
 
 impl Model {
+    #[must_use]
+    pub fn with_limits(resource_limits: ResourceLimits) -> Self {
+        Self {
+            resource_limits,
+            ..Self::default()
+        }
+    }
+
     pub fn create(&mut self, parent: Option<u64>, state: ResourceState) -> Result<u64, ModelError> {
         if let Some(parent_id) = parent {
             let parent_node = self
@@ -304,6 +448,8 @@ impl Model {
         } else if state.kind() != ResourceKind::Application {
             return Err(ModelError::Parent(0));
         }
+        let added_usage = state.usage();
+        let next_usage = self.checked_resource_usage(added_usage)?;
         let id = self.next_id;
         self.next_id = self.next_id.checked_add(1).ok_or(ModelError::Overflow)?;
         self.resources.insert(
@@ -315,6 +461,7 @@ impl Model {
                 state,
             },
         );
+        self.resource_usage = next_usage;
         if let Some(parent_id) = parent {
             self.resources
                 .get_mut(&parent_id)
@@ -411,6 +558,14 @@ impl Model {
             .iter()
             .filter(|closing| self.active_accessibility_bridges.remove(closing))
             .count();
+        let closed_usage = order
+            .iter()
+            .filter_map(|closing| self.resources.get(closing))
+            .fold(ResourceUsage::default(), |total, node| {
+                total
+                    .checked_add(node.state.usage())
+                    .expect("tracked resource usage must not overflow")
+            });
         for closing in &order {
             if let Some(node) = self.resources.remove(closing)
                 && let Some(parent) = node.parent
@@ -420,6 +575,10 @@ impl Model {
             }
         }
         self.resource_metrics.live = self.resources.len();
+        self.resource_usage = self
+            .resource_usage
+            .checked_sub(closed_usage)
+            .expect("closed resources must have tracked usage");
         self.resource_metrics.closed = self
             .resource_metrics
             .closed
@@ -459,6 +618,53 @@ impl Model {
     #[must_use]
     pub const fn resource_metrics(&self) -> ResourceMetrics {
         self.resource_metrics
+    }
+
+    #[must_use]
+    pub const fn resource_limits(&self) -> ResourceLimits {
+        self.resource_limits
+    }
+
+    #[must_use]
+    pub const fn resource_usage(&self) -> ResourceUsage {
+        self.resource_usage
+    }
+
+    fn checked_resource_usage(&self, added: ResourceUsage) -> Result<ResourceUsage, ModelError> {
+        let next = self
+            .resource_usage
+            .checked_add(added)
+            .ok_or(ModelError::Quota(QuotaKind::Resources))?;
+        for (usage, limit, kind) in [
+            (
+                next.resources,
+                self.resource_limits.resources,
+                QuotaKind::Resources,
+            ),
+            (
+                next.windows,
+                self.resource_limits.windows,
+                QuotaKind::Windows,
+            ),
+            (next.timers, self.resource_limits.timers, QuotaKind::Timers),
+            (next.images, self.resource_limits.images, QuotaKind::Images),
+            (next.fonts, self.resource_limits.fonts, QuotaKind::Fonts),
+            (
+                next.image_bytes,
+                self.resource_limits.image_bytes,
+                QuotaKind::ImageBytes,
+            ),
+            (
+                next.font_bytes,
+                self.resource_limits.font_bytes,
+                QuotaKind::FontBytes,
+            ),
+        ] {
+            if usage > limit {
+                return Err(ModelError::Quota(kind));
+            }
+        }
+        Ok(next)
     }
 
     pub fn submit_frame(
@@ -854,6 +1060,195 @@ mod tests {
             ),
             Err(ModelError::Parent(window))
         );
+    }
+
+    #[test]
+    fn enforces_resource_count_quotas_before_allocating_ids() {
+        let limits = ResourceLimits {
+            resources: 3,
+            windows: 1,
+            timers: 2,
+            images: 0,
+            fonts: 0,
+            image_bytes: 0,
+            font_bytes: 0,
+        };
+        let mut model = Model::with_limits(limits);
+        let application = app(&mut model);
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        assert_eq!(
+            model.create(Some(application), ResourceState::Window(Box::default())),
+            Err(ModelError::Quota(QuotaKind::Windows))
+        );
+        let timer = model
+            .create(
+                Some(application),
+                ResourceState::Timer(TimerState {
+                    interval: Duration::from_millis(10),
+                    repeating: false,
+                    next_deadline: Instant::now(),
+                    cancelled: false,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            model.create(
+                Some(application),
+                ResourceState::Timer(TimerState {
+                    interval: Duration::from_millis(10),
+                    repeating: false,
+                    next_deadline: Instant::now(),
+                    cancelled: false,
+                }),
+            ),
+            Err(ModelError::Quota(QuotaKind::Resources))
+        );
+        assert_eq!(
+            model.resource_usage(),
+            ResourceUsage {
+                resources: 3,
+                windows: 1,
+                timers: 1,
+                ..ResourceUsage::default()
+            }
+        );
+
+        model.close(window).unwrap();
+        let replacement = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        assert_eq!(replacement, timer + 1);
+        model.close(application).unwrap();
+        assert_eq!(model.resource_usage(), ResourceUsage::default());
+    }
+
+    #[test]
+    fn rejects_each_resource_kind_at_its_application_quota() {
+        let limits = ResourceLimits {
+            resources: 8,
+            windows: 0,
+            timers: 0,
+            images: 0,
+            fonts: 0,
+            image_bytes: 16,
+            font_bytes: 16,
+        };
+        let mut model = Model::with_limits(limits);
+        let application = app(&mut model);
+        let cases = [
+            (ResourceState::Window(Box::default()), QuotaKind::Windows),
+            (
+                ResourceState::Timer(TimerState {
+                    interval: Duration::from_millis(10),
+                    repeating: false,
+                    next_deadline: Instant::now(),
+                    cancelled: false,
+                }),
+                QuotaKind::Timers,
+            ),
+            (
+                ResourceState::Image {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 4],
+                },
+                QuotaKind::Images,
+            ),
+            (
+                ResourceState::Font {
+                    family: "测试".to_owned(),
+                    bytes: Some(vec![0; 4]),
+                },
+                QuotaKind::Fonts,
+            ),
+        ];
+        for (state, quota) in cases {
+            assert_eq!(
+                model.create(Some(application), state),
+                Err(ModelError::Quota(quota))
+            );
+            assert!(quota.code().starts_with("PLATFORM_QUOTA_"));
+        }
+        assert_eq!(
+            model.resource_usage(),
+            ResourceUsage {
+                resources: 1,
+                ..ResourceUsage::default()
+            }
+        );
+    }
+
+    #[test]
+    fn releases_owned_image_and_font_byte_quotas_on_close() {
+        let limits = ResourceLimits {
+            resources: 8,
+            windows: 0,
+            timers: 0,
+            images: 2,
+            fonts: 2,
+            image_bytes: 4,
+            font_bytes: 3,
+        };
+        let mut model = Model::with_limits(limits);
+        let application = app(&mut model);
+        let image = model
+            .create(
+                Some(application),
+                ResourceState::Image {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 4],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            model.create(
+                Some(application),
+                ResourceState::Image {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 1],
+                },
+            ),
+            Err(ModelError::Quota(QuotaKind::ImageBytes))
+        );
+        model.close(image).unwrap();
+        model
+            .create(
+                Some(application),
+                ResourceState::Image {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 1],
+                },
+            )
+            .unwrap();
+
+        let font = model
+            .create(
+                Some(application),
+                ResourceState::Font {
+                    family: "测试".to_owned(),
+                    bytes: Some(vec![0; 3]),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            model.create(
+                Some(application),
+                ResourceState::Font {
+                    family: "测试二".to_owned(),
+                    bytes: Some(vec![0; 1]),
+                },
+            ),
+            Err(ModelError::Quota(QuotaKind::FontBytes))
+        );
+        model.close(font).unwrap();
+        assert_eq!(model.resource_usage().font_bytes, 0);
+        model.close(application).unwrap();
+        assert_eq!(model.resource_usage(), ResourceUsage::default());
     }
 
     #[test]
