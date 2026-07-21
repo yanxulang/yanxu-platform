@@ -31,8 +31,8 @@ const TYPE_WINDOW: &[u8] = b"yanxu.platform.window";
 const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
-const PLATFORM_MAJOR: i64 = 1;
-const PLATFORM_MINOR: i64 = 7;
+pub(crate) const PLATFORM_MAJOR: i64 = 1;
+pub(crate) const PLATFORM_MINOR: i64 = 7;
 const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPBOARD_IMAGE_DIMENSION: usize = 16_384;
 const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -923,7 +923,7 @@ pub unsafe fn call(
     }
 }
 
-fn protocol_info() -> Data {
+pub(crate) fn protocol_info() -> Data {
     Data::map([
         ("平台主", Data::Integer(PLATFORM_MAJOR)),
         ("平台次", Data::Integer(PLATFORM_MINOR)),
@@ -988,7 +988,7 @@ fn accessibility_state_data(state: &AccessibilityState, changed: Option<bool>) -
     Data::Map(result)
 }
 
-fn capabilities() -> Data {
+pub(crate) fn capabilities() -> Data {
     Data::map([
         ("系统", Data::String(std::env::consts::OS.to_owned())),
         ("架构", Data::String(std::env::consts::ARCH.to_owned())),
@@ -1887,8 +1887,8 @@ fn limited_image_reader(
     max_alloc: usize,
 ) -> Result<image::ImageReader<Cursor<&[u8]>>, ImageDecodeError> {
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16_384);
-    limits.max_image_height = Some(16_384);
+    limits.max_image_width = Some(crate::render::MAX_DIMENSION);
+    limits.max_image_height = Some(crate::render::MAX_DIMENSION);
     limits.max_alloc = Some(u64::try_from(max_alloc).unwrap_or(u64::MAX));
     let mut reader = image::ImageReader::new(Cursor::new(bytes));
     reader = reader

@@ -15,6 +15,8 @@ pub mod event;
 pub mod model;
 mod native_accessibility;
 pub mod protocol;
+#[cfg(test)]
+mod protocol_snapshot;
 pub mod render;
 pub mod sync;
 pub mod text;

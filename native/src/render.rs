@@ -30,10 +30,10 @@ pub const OP_PATH: u16 = 15;
 pub const OP_TEXT_STYLE: u16 = 16;
 pub const OP_GLYPH_RUN: u16 = 17;
 
-const MAX_DIMENSION: u32 = 16_384;
-const MAX_STATE_DEPTH: usize = 256;
-const MAX_PATH_VERBS: usize = 65_536;
-const MAX_GLYPHS_PER_RUN: usize = 262_144;
+pub(crate) const MAX_DIMENSION: u32 = 16_384;
+pub(crate) const MAX_STATE_DEPTH: usize = 256;
+pub(crate) const MAX_PATH_VERBS: usize = u16::MAX as usize;
+pub(crate) const MAX_GLYPHS_PER_RUN: usize = 262_144;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageData {
@@ -832,10 +832,12 @@ fn draw_path(pixmap: &mut Pixmap, state: &RenderState, payload: &[u8]) -> Result
     let mut builder = PathBuilder::new();
     for _ in 0..verb_count {
         match reader.u8()? {
-            1 => builder.move_to(reader.f32()?, reader.f32()?),
-            2 => builder.line_to(reader.f32()?, reader.f32()?),
-            3 => builder.quad_to(reader.f32()?, reader.f32()?, reader.f32()?, reader.f32()?),
-            4 => builder.cubic_to(
+            protocol::PATH_MOVE => builder.move_to(reader.f32()?, reader.f32()?),
+            protocol::PATH_LINE => builder.line_to(reader.f32()?, reader.f32()?),
+            protocol::PATH_QUADRATIC => {
+                builder.quad_to(reader.f32()?, reader.f32()?, reader.f32()?, reader.f32()?)
+            }
+            protocol::PATH_CUBIC => builder.cubic_to(
                 reader.f32()?,
                 reader.f32()?,
                 reader.f32()?,
@@ -843,7 +845,7 @@ fn draw_path(pixmap: &mut Pixmap, state: &RenderState, payload: &[u8]) -> Result
                 reader.f32()?,
                 reader.f32()?,
             ),
-            5 => builder.close(),
+            protocol::PATH_CLOSE => builder.close(),
             _ => return Err(RenderError::Path),
         }
     }

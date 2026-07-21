@@ -76,6 +76,7 @@ cargo test --manifest-path yanxu-platform/Cargo.toml --workspace --all-targets -
 - [实际架构](docs/ARCHITECTURE.md)与[平台 API](docs/PLATFORM_API.md)
 - [事件协议](docs/EVENT_PROTOCOL.md)、[无障碍协议](docs/ACCESSIBILITY_PROTOCOL.md)、
   [绘制协议](docs/DRAW_PROTOCOL.md)和[文字/IME](docs/TEXT_AND_IME.md)
+- [1.0 协议冻结](docs/PROTOCOL_CONTRACT_1_0.md)
 - [资源生命周期](docs/RESOURCE_LIFETIME.md)、[线程模型](docs/THREADING_MODEL.md)、
   [Release 性能预算](docs/PERFORMANCE_BUDGET.md)与[兼容政策](docs/COMPATIBILITY.md)
 - [后端贡献](docs/BACKEND_GUIDE.md)、[打包发布](docs/PACKAGING.md)、
