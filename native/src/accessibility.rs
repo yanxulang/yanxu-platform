@@ -170,6 +170,14 @@ impl SemanticNode {
     }
 
     #[must_use]
+    pub(crate) fn find(&self, id: i64) -> Option<&Self> {
+        if self.id == id {
+            return Some(self);
+        }
+        self.children.iter().find_map(|child| child.find(id))
+    }
+
+    #[must_use]
     pub fn to_data(&self) -> Data {
         Data::map([
             ("编号", Data::Integer(self.id)),

@@ -4,8 +4,8 @@ use crate::accessibility::{AccessibilityState, SemanticNode};
 use crate::data::Data;
 use crate::sync::RecoverMutex;
 use accesskit::{
-    Action, ActivationHandler, AriaCurrent, CustomAction, Invalid, Node, NodeId, Orientation, Rect,
-    Role, Toggled, Tree, TreeId, TreeUpdate,
+    Action, ActionData, ActionRequest, ActivationHandler, AriaCurrent, CustomAction, Invalid, Node,
+    NodeId, Orientation, Rect, Role, ScrollUnit, Toggled, Tree, TreeId, TreeUpdate,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -21,6 +21,28 @@ const CUSTOM_CUT: i32 = 4;
 const CUSTOM_PASTE: i32 = 5;
 const MAX_NATIVE_SCALE_FACTOR: f64 = 1_024.0;
 const MAX_EXACT_F64_INTEGER: i64 = 9_007_199_254_740_992;
+const MIN_I64_AS_F64: f64 = -9_223_372_036_854_775_808.0;
+const MAX_I64_AS_F64_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum NativeRequest {
+    Focus {
+        node_id: i64,
+    },
+    Action {
+        node_id: i64,
+        action: &'static str,
+        argument: Data,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeRequestError {
+    Tree,
+    Target,
+    Action,
+    Data,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativeTreeSnapshot {
@@ -169,6 +191,204 @@ pub(crate) fn full_tree_update(
         tree_id: TreeId::ROOT,
         focus: accessibility.focused().map_or(WINDOW_ROOT_ID, node_id),
     }
+}
+
+pub(crate) fn translate_action_request(
+    accessibility: &AccessibilityState,
+    request: &ActionRequest,
+) -> Result<NativeRequest, NativeRequestError> {
+    if request.target_tree != TreeId::ROOT {
+        return Err(NativeRequestError::Tree);
+    }
+    let node_id = semantic_node_id(request.target_node).ok_or(NativeRequestError::Target)?;
+    let tree = accessibility.tree().ok_or(NativeRequestError::Tree)?;
+    let semantic = tree
+        .root()
+        .find(node_id)
+        .ok_or(NativeRequestError::Target)?;
+
+    let (action, argument) = match request.action {
+        Action::Focus if request.data.is_none() => {
+            return Ok(NativeRequest::Focus { node_id });
+        }
+        Action::Click if request.data.is_none() => {
+            let action = if semantic.actions().iter().any(|action| action == "点击") {
+                "点击"
+            } else if semantic.actions().iter().any(|action| action == "选择") {
+                "选择"
+            } else {
+                return Err(NativeRequestError::Action);
+            };
+            (action, Data::Nil)
+        }
+        Action::SetValue => (
+            "设置值",
+            set_value_argument(semantic, request.data.as_ref())?,
+        ),
+        Action::SetTextSelection => (
+            "选择",
+            text_selection_argument(semantic, request.data.as_ref())?,
+        ),
+        Action::CustomAction => custom_action_request(request.data.as_ref())?,
+        Action::Expand if request.data.is_none() => ("展开", Data::Nil),
+        Action::Collapse if request.data.is_none() => ("折叠", Data::Nil),
+        Action::Increment if request.data.is_none() => ("增加", Data::Nil),
+        Action::Decrement if request.data.is_none() => ("减少", Data::Nil),
+        Action::ScrollUp | Action::ScrollDown | Action::ScrollLeft | Action::ScrollRight => (
+            "滚动",
+            scroll_argument(semantic, request.action, request.data.as_ref())?,
+        ),
+        Action::ScrollIntoView
+            if matches!(
+                request.data.as_ref(),
+                None | Some(ActionData::ScrollHint(_))
+            ) =>
+        {
+            ("滚动到", Data::Nil)
+        }
+        Action::ShowContextMenu if request.data.is_none() => ("显示菜单", Data::Nil),
+        Action::Blur
+        | Action::HideTooltip
+        | Action::ShowTooltip
+        | Action::ReplaceSelectedText
+        | Action::ScrollToPoint
+        | Action::SetScrollOffset
+        | Action::SetSequentialFocusNavigationStartingPoint => {
+            return Err(NativeRequestError::Action);
+        }
+        Action::Focus
+        | Action::Click
+        | Action::Expand
+        | Action::Collapse
+        | Action::Increment
+        | Action::Decrement
+        | Action::ScrollIntoView
+        | Action::ShowContextMenu => return Err(NativeRequestError::Data),
+    };
+    Ok(NativeRequest::Action {
+        node_id,
+        action,
+        argument,
+    })
+}
+
+fn semantic_node_id(id: NodeId) -> Option<i64> {
+    if id == WINDOW_ROOT_ID || id.0 & TEXT_RUN_ID_MASK != 0 {
+        return None;
+    }
+    i64::try_from(id.0).ok().filter(|id| *id > 0)
+}
+
+fn set_value_argument(
+    semantic: &SemanticNode,
+    data: Option<&ActionData>,
+) -> Result<Data, NativeRequestError> {
+    match data {
+        Some(ActionData::Value(value)) => Ok(Data::String(value.to_string())),
+        Some(ActionData::NumericValue(value))
+            if semantic.role() == "组合框"
+                && value.is_finite()
+                && value.fract() == 0.0
+                && *value >= MIN_I64_AS_F64
+                && *value < MAX_I64_AS_F64_EXCLUSIVE =>
+        {
+            Ok(Data::Integer(*value as i64))
+        }
+        Some(ActionData::NumericValue(value)) if value.is_finite() => Ok(Data::Number(*value)),
+        _ => Err(NativeRequestError::Data),
+    }
+}
+
+fn text_selection_argument(
+    semantic: &SemanticNode,
+    data: Option<&ActionData>,
+) -> Result<Data, NativeRequestError> {
+    let Some(ActionData::SetTextSelection(selection)) = data else {
+        return Err(NativeRequestError::Data);
+    };
+    if !matches!(semantic.role(), "输入框" | "多行输入框") {
+        return Err(NativeRequestError::Action);
+    }
+    let value = match semantic.value() {
+        Data::String(value) => value.as_str(),
+        Data::Nil => "",
+        _ => return Err(NativeRequestError::Data),
+    };
+    let run_id = text_run_id(semantic.id());
+    let anchor = text_position_byte_offset(value, run_id, selection.anchor)?;
+    let focus = text_position_byte_offset(value, run_id, selection.focus)?;
+    let start = anchor.min(focus);
+    let end = anchor.max(focus);
+    Ok(Data::map([
+        (
+            "起",
+            Data::Integer(i64::try_from(start).map_err(|_| NativeRequestError::Data)?),
+        ),
+        (
+            "终",
+            Data::Integer(i64::try_from(end).map_err(|_| NativeRequestError::Data)?),
+        ),
+    ]))
+}
+
+fn text_position_byte_offset(
+    value: &str,
+    run_id: NodeId,
+    position: accesskit::TextPosition,
+) -> Result<usize, NativeRequestError> {
+    if position.node != run_id {
+        return Err(NativeRequestError::Target);
+    }
+    let lengths = grapheme_byte_lengths(value);
+    if position.character_index > lengths.len() {
+        return Err(NativeRequestError::Data);
+    }
+    Ok(lengths[..position.character_index]
+        .iter()
+        .map(|length| usize::from(*length))
+        .sum())
+}
+
+fn custom_action_request(
+    data: Option<&ActionData>,
+) -> Result<(&'static str, Data), NativeRequestError> {
+    let Some(ActionData::CustomAction(id)) = data else {
+        return Err(NativeRequestError::Data);
+    };
+    let action = match *id {
+        CUSTOM_SELECT => "选择",
+        CUSTOM_DESELECT => "取消选择",
+        CUSTOM_COPY => "复制",
+        CUSTOM_CUT => "剪切",
+        CUSTOM_PASTE => "粘贴",
+        _ => return Err(NativeRequestError::Action),
+    };
+    Ok((action, Data::Nil))
+}
+
+fn scroll_argument(
+    semantic: &SemanticNode,
+    action: Action,
+    data: Option<&ActionData>,
+) -> Result<Data, NativeRequestError> {
+    let unit = match data {
+        None => ScrollUnit::Item,
+        Some(ActionData::ScrollUnit(unit)) => *unit,
+        Some(_) => return Err(NativeRequestError::Data),
+    };
+    let [_, _, width, height] = semantic.bounds();
+    let (axis, direction, page_extent) = match action {
+        Action::ScrollUp => ("纵向", -1.0, height),
+        Action::ScrollDown => ("纵向", 1.0, height),
+        Action::ScrollLeft => ("横向", -1.0, width),
+        Action::ScrollRight => ("横向", 1.0, width),
+        _ => return Err(NativeRequestError::Action),
+    };
+    let magnitude = match unit {
+        ScrollUnit::Item => 1.0,
+        ScrollUnit::Page => page_extent.max(1.0),
+    };
+    Ok(Data::map([(axis, Data::Number(direction * magnitude))]))
 }
 
 fn normalized_scale_factor(scale_factor: f64) -> f64 {
@@ -371,9 +591,10 @@ fn apply_actions(node: &mut Node, role: &str, actions: &[String], states: &BTree
             "聚焦" => node.add_action(Action::Focus),
             "点击" => node.add_action(Action::Click),
             "设置值" => node.add_action(Action::SetValue),
-            "选择" if matches!(role, "输入框" | "多行输入框" | "密码框") => {
+            "选择" if matches!(role, "输入框" | "多行输入框") => {
                 node.add_action(Action::SetTextSelection);
             }
+            "选择" if role == "密码框" => {}
             "选择" if actions.iter().any(|action| action == "点击") => {
                 add_custom_action(node, CUSTOM_SELECT, "选择");
             }
@@ -432,6 +653,7 @@ fn state_bool(states: &BTreeMap<String, Data>, name: &str) -> Option<bool> {
 mod tests {
     use super::*;
     use crate::accessibility::{SEMANTIC_ACTIONS, SEMANTIC_ROLES, SemanticTree};
+    use accesskit::{ScrollHint, TextPosition, TextSelection};
 
     fn semantic_node(
         id: i64,
@@ -481,6 +703,15 @@ mod tests {
             .find(|(node_id, _)| *node_id == NodeId(id))
             .unwrap()
             .1
+    }
+
+    fn action_request(action: Action, target: i64, data: Option<ActionData>) -> ActionRequest {
+        ActionRequest {
+            action,
+            target_tree: TreeId::ROOT,
+            target_node: node_id(target),
+            data,
+        }
     }
 
     #[test]
@@ -899,7 +1130,9 @@ mod tests {
         let input_run = converted_node(&update, TEXT_RUN_ID_MASK | 2);
         assert_eq!(input_run.value(), Some(""));
         assert!(input_run.character_lengths().is_empty());
-        assert!(converted_node(&update, 3).children().is_empty());
+        let password = converted_node(&update, 3);
+        assert!(password.children().is_empty());
+        assert!(!password.supports_action(Action::SetTextSelection));
 
         let oversized_grapheme = format!("a{}", "\u{301}".repeat(200));
         let lengths = grapheme_byte_lengths(&oversized_grapheme);
@@ -911,5 +1144,207 @@ mod tests {
             oversized_grapheme.len()
         );
         assert!(lengths.len() > 1);
+    }
+
+    #[test]
+    fn translates_focus_click_selection_and_custom_actions() {
+        let state = state_with(semantic_node(
+            1,
+            "按钮",
+            Data::Nil,
+            BTreeMap::from([("可聚焦".to_owned(), Data::Bool(true))]),
+            &["聚焦", "点击"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        ));
+        assert_eq!(
+            translate_action_request(&state, &action_request(Action::Focus, 1, None)),
+            Ok(NativeRequest::Focus { node_id: 1 })
+        );
+        assert_eq!(
+            translate_action_request(&state, &action_request(Action::Click, 1, None)),
+            Ok(NativeRequest::Action {
+                node_id: 1,
+                action: "点击",
+                argument: Data::Nil,
+            })
+        );
+        assert_eq!(
+            translate_action_request(
+                &state,
+                &action_request(Action::Click, 1, Some(ActionData::Value("意外参数".into())),),
+            ),
+            Err(NativeRequestError::Data)
+        );
+
+        let state = state_with(semantic_node(
+            2,
+            "标签",
+            Data::Nil,
+            BTreeMap::new(),
+            &["点击", "选择", "取消选择"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        ));
+        assert_eq!(
+            translate_action_request(
+                &state,
+                &action_request(
+                    Action::CustomAction,
+                    2,
+                    Some(ActionData::CustomAction(CUSTOM_SELECT)),
+                ),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 2,
+                action: "选择",
+                argument: Data::Nil,
+            })
+        );
+        assert_eq!(
+            translate_action_request(
+                &state,
+                &action_request(
+                    Action::CustomAction,
+                    2,
+                    Some(ActionData::CustomAction(CUSTOM_DESELECT)),
+                ),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 2,
+                action: "取消选择",
+                argument: Data::Nil,
+            })
+        );
+    }
+
+    #[test]
+    fn translates_text_selection_to_utf8_byte_boundaries() {
+        let value = "A言👨‍👩‍👧‍👦e\u{301}";
+        let state = state_with(semantic_node(
+            7,
+            "输入框",
+            Data::String(value.to_owned()),
+            BTreeMap::new(),
+            &["选择"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        ));
+        let run = text_run_id(7);
+        let selection = TextSelection {
+            anchor: TextPosition {
+                node: run,
+                character_index: 3,
+            },
+            focus: TextPosition {
+                node: run,
+                character_index: 1,
+            },
+        };
+        assert_eq!(
+            translate_action_request(
+                &state,
+                &action_request(
+                    Action::SetTextSelection,
+                    7,
+                    Some(ActionData::SetTextSelection(selection)),
+                ),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 7,
+                action: "选择",
+                argument: Data::map([("起", Data::Integer(1)), ("终", Data::Integer(29)),]),
+            })
+        );
+
+        let wrong_run = TextSelection {
+            anchor: TextPosition {
+                node: text_run_id(8),
+                character_index: 0,
+            },
+            focus: TextPosition {
+                node: run,
+                character_index: 0,
+            },
+        };
+        assert_eq!(
+            translate_action_request(
+                &state,
+                &action_request(
+                    Action::SetTextSelection,
+                    7,
+                    Some(ActionData::SetTextSelection(wrong_run)),
+                ),
+            ),
+            Err(NativeRequestError::Target)
+        );
+    }
+
+    #[test]
+    fn translates_native_values_scroll_units_and_hints() {
+        let combo = state_with(semantic_node(
+            2,
+            "组合框",
+            Data::Integer(1),
+            BTreeMap::new(),
+            &["设置值"],
+            [0.0, 0.0, 100.0, 50.0],
+            Vec::new(),
+        ));
+        assert_eq!(
+            translate_action_request(
+                &combo,
+                &action_request(Action::SetValue, 2, Some(ActionData::NumericValue(3.0)),),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 2,
+                action: "设置值",
+                argument: Data::Integer(3),
+            })
+        );
+
+        let list = state_with(semantic_node(
+            3,
+            "列表",
+            Data::Nil,
+            BTreeMap::new(),
+            &["滚动", "滚动到"],
+            [0.0, 0.0, 100.0, 50.0],
+            Vec::new(),
+        ));
+        assert_eq!(
+            translate_action_request(
+                &list,
+                &action_request(
+                    Action::ScrollDown,
+                    3,
+                    Some(ActionData::ScrollUnit(ScrollUnit::Page)),
+                ),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 3,
+                action: "滚动",
+                argument: Data::map([("纵向", Data::Number(50.0))]),
+            })
+        );
+        assert_eq!(
+            translate_action_request(
+                &list,
+                &action_request(
+                    Action::ScrollIntoView,
+                    3,
+                    Some(ActionData::ScrollHint(ScrollHint::TopEdge)),
+                ),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 3,
+                action: "滚动到",
+                argument: Data::Nil,
+            })
+        );
+        assert_eq!(
+            translate_action_request(&list, &action_request(Action::Focus, 0, None)),
+            Err(NativeRequestError::Target)
+        );
     }
 }

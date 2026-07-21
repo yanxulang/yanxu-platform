@@ -1,10 +1,13 @@
 //! `winit` 事件循环与 `softbuffer` 绘制表面的真实桌面实现。
 
+use crate::accessibility::AccessibilitySource;
 use crate::backend::{HostApi, PlatformResource, monotonic_seconds};
 use crate::data::Data;
 use crate::event::{EventKind, PlatformEvent};
 use crate::model::{DisplayState, Model, ResourceKind, ResourceState, WindowState};
-use crate::native_accessibility::{NativeActivationHandler, NativeTreeSnapshot};
+use crate::native_accessibility::{
+    NativeActivationHandler, NativeRequest, NativeTreeSnapshot, translate_action_request,
+};
 use crate::render::{ImageData, RenderEngine};
 use crate::sync::RecoverMutex;
 use accesskit_winit::{
@@ -1018,12 +1021,20 @@ impl ApplicationHandler<UserEvent> for Runner {
         let UserEvent::Accessibility(event) = event else {
             return;
         };
-        if !self.window_ids.contains_key(&event.window_id) {
+        let Some(model_id) = self.window_ids.get(&event.window_id).copied() else {
             return;
-        }
+        };
         match event.window_event {
+            AccessibilityWindowEvent::ActionRequested(request) => {
+                let result = {
+                    let mut model = self.model.lock_recover();
+                    dispatch_accessibility_request(&mut model, model_id, &request)
+                };
+                if result == Err("PLATFORM_QUEUE_FULL") {
+                    self.fail("PLATFORM_QUEUE_FULL");
+                }
+            }
             AccessibilityWindowEvent::InitialTreeRequested
-            | AccessibilityWindowEvent::ActionRequested(_)
             | AccessibilityWindowEvent::AccessibilityDeactivated => {}
         }
     }
@@ -1143,6 +1154,51 @@ fn sync_accessibility(native: &mut NativeWindow, state: &WindowState) {
     native
         .accessibility_adapter
         .update_if_active(move || snapshot.lock_recover().full_update());
+}
+
+fn dispatch_accessibility_request(
+    model: &mut Model,
+    window_id: u64,
+    request: &accesskit::ActionRequest,
+) -> Result<(), &'static str> {
+    let translated = (|| {
+        let node = model
+            .get(window_id)
+            .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+        let ResourceState::Window(window) = &node.state else {
+            return Err("PLATFORM_RESOURCE_TYPE");
+        };
+        translate_action_request(&window.accessibility, request)
+            .map_err(|_| "PLATFORM_ACCESSIBILITY_ACTION")
+    })();
+    let translated = match translated {
+        Ok(request) => request,
+        Err(code) => {
+            model.record_accessibility_rejection();
+            return Err(code);
+        }
+    };
+    let result = match translated {
+        NativeRequest::Focus { node_id } => model.request_accessibility_focus(
+            window_id,
+            node_id,
+            AccessibilitySource::AssistiveTechnology,
+            monotonic_seconds(),
+        ),
+        NativeRequest::Action {
+            node_id,
+            action,
+            argument,
+        } => model.request_accessibility_action(
+            window_id,
+            node_id,
+            action,
+            argument,
+            AccessibilitySource::AssistiveTechnology,
+            monotonic_seconds(),
+        ),
+    };
+    result.map_err(|error| error.code())
 }
 
 fn display_state(monitor: &MonitorHandle, primary: Option<&MonitorHandle>) -> DisplayState {
@@ -1310,6 +1366,9 @@ fn image_lookup(host: HostApi, handle: u64) -> Option<ImageData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accessibility::SemanticTree;
+    use crate::event::EventBatcher;
+    use accesskit::{Action, ActionData, ActionRequest, NodeId, TreeId};
     use winit::event::MouseScrollDelta;
     use winit::keyboard::{KeyCode, NamedKey};
 
@@ -1383,5 +1442,73 @@ mod tests {
             panic!("frame latency must be a number")
         };
         assert!((latency - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn native_accessibility_actions_reenter_the_validated_event_queue() {
+        let mut model = Model::default();
+        let application = model
+            .create(
+                None,
+                ResourceState::Application {
+                    name: "测试".to_owned(),
+                    exit_requested: false,
+                },
+            )
+            .unwrap();
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let tree = Data::map([
+            ("编号", Data::Integer(7)),
+            ("角色", Data::String("按钮".to_owned())),
+            (
+                "状态",
+                Data::map([("启用", Data::Bool(true)), ("可见", Data::Bool(true))]),
+            ),
+            ("操作", Data::Array(vec![Data::String("点击".to_owned())])),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 80.into(), 30.into()]),
+            ),
+        ]);
+        let ResourceState::Window(state) = &mut model.get_mut(window).unwrap().state else {
+            panic!("window state expected")
+        };
+        state
+            .accessibility
+            .replace(Some(SemanticTree::validate(&tree).unwrap()))
+            .unwrap();
+        let request = ActionRequest {
+            action: Action::Click,
+            target_tree: TreeId::ROOT,
+            target_node: NodeId(7),
+            data: None,
+        };
+        dispatch_accessibility_request(&mut model, window, &request).unwrap();
+        let batch = model.events.take_data().unwrap();
+        let Data::Array(events) = &batch.as_map().unwrap()["事件"] else {
+            panic!("events expected")
+        };
+        let event = events[0].as_map().unwrap();
+        assert_eq!(event["类型"], Data::String("无障碍动作请求".to_owned()));
+        assert_eq!(event["节点"], Data::Integer(7));
+        assert_eq!(event["动作"], Data::String("点击".to_owned()));
+
+        let malformed = ActionRequest {
+            data: Some(ActionData::Value("意外参数".into())),
+            ..request.clone()
+        };
+        assert_eq!(
+            dispatch_accessibility_request(&mut model, window, &malformed),
+            Err("PLATFORM_ACCESSIBILITY_ACTION")
+        );
+        model.events = EventBatcher::with_capacity(0);
+        assert_eq!(
+            dispatch_accessibility_request(&mut model, window, &request),
+            Err("PLATFORM_QUEUE_FULL")
+        );
+        assert_eq!(model.accessibility_metrics().action_requests, 1);
+        assert_eq!(model.accessibility_metrics().rejected, 2);
     }
 }
