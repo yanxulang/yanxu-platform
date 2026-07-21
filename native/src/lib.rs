@@ -4,6 +4,7 @@
 //! 模型能够由普通单元测试覆盖。
 
 pub mod abi;
+pub mod accessibility;
 pub mod backend;
 pub mod bridge;
 pub mod data;
@@ -74,6 +75,8 @@ static FUNCTIONS: &[(&[u8], Operation)] = &[
     ("剪贴板读取图片".as_bytes(), Operation::ClipboardReadImage),
     ("剪贴板写入图片".as_bytes(), Operation::ClipboardWriteImage),
     ("帧提交反馈".as_bytes(), Operation::SubmitFrameFeedback),
+    ("无障碍更新".as_bytes(), Operation::AccessibilityUpdate),
+    ("无障碍查询".as_bytes(), Operation::AccessibilityQuery),
 ];
 
 #[unsafe(no_mangle)]

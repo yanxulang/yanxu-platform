@@ -1,6 +1,11 @@
 //! ABI 操作到无句柄平台模型的映射。
 
 use crate::abi::{self, NativeError, NativeHost};
+use crate::accessibility::{
+    ACCESSIBILITY_MAJOR, ACCESSIBILITY_MINOR, AccessibilityState, MAX_SEMANTIC_ACTIONS,
+    MAX_SEMANTIC_CHILDREN, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NODE_TEXT_BYTES, MAX_SEMANTIC_NODES,
+    MAX_SEMANTIC_TEXT_BYTES, SEMANTIC_ACTIONS, SEMANTIC_ROLES, SEMANTIC_STATES, SemanticTree,
+};
 use crate::bridge::{encode_data, free_value};
 use crate::data::Data;
 use crate::event::{EVENT_MAJOR, EVENT_MINOR, EventKind, PlatformEvent};
@@ -23,7 +28,7 @@ const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
 const PLATFORM_MAJOR: i64 = 1;
-const PLATFORM_MINOR: i64 = 4;
+const PLATFORM_MINOR: i64 = 5;
 const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPBOARD_IMAGE_DIMENSION: usize = 16_384;
 const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -194,6 +199,8 @@ pub enum Operation {
     ClipboardReadImage,
     ClipboardWriteImage,
     SubmitFrameFeedback,
+    AccessibilityUpdate,
+    AccessibilityQuery,
 }
 
 impl Operation {
@@ -237,6 +244,8 @@ impl Operation {
             35 => Self::ClipboardReadImage,
             36 => Self::ClipboardWriteImage,
             37 => Self::SubmitFrameFeedback,
+            38 => Self::AccessibilityUpdate,
+            39 => Self::AccessibilityQuery,
             _ => return None,
         })
     }
@@ -389,6 +398,55 @@ pub unsafe fn call(
             let bytes = bytes(&arguments[1])?;
             let (count, submission) = submit_frame(resource, bytes)?;
             Ok(Output::Value(frame_submission_data(count, submission)))
+        }
+        Operation::AccessibilityUpdate => {
+            require_count(arguments, 2)?;
+            let (_, resource) = unsafe { resource(arguments, 0, host, ResourceKind::Window) }?;
+            let tree = match &arguments[1] {
+                Data::Nil => None,
+                value => match SemanticTree::validate(value) {
+                    Ok(tree) => Some(tree),
+                    Err(error) => {
+                        resource
+                            .model
+                            .lock_recover()
+                            .record_accessibility_rejection();
+                        return Err(error.code());
+                    }
+                },
+            };
+            let mut model = resource.model.lock_recover();
+            let changed = model
+                .replace_accessibility(resource.id, tree)
+                .map_err(|error| error.code())?;
+            let node = model
+                .get(resource.id)
+                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+            let ResourceState::Window(window) = &node.state else {
+                return Err("PLATFORM_RESOURCE_TYPE");
+            };
+            let result = accessibility_state_data(&window.accessibility, Some(changed));
+            drop(model);
+            if changed {
+                let _ = crate::windowing::wake(resource.host.0.event_loop_id);
+                resource.host.wake();
+            }
+            Ok(Output::Value(result))
+        }
+        Operation::AccessibilityQuery => {
+            require_count(arguments, 1)?;
+            let (_, resource) = unsafe { resource(arguments, 0, host, ResourceKind::Window) }?;
+            let model = resource.model.lock_recover();
+            let node = model
+                .get(resource.id)
+                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+            let ResourceState::Window(window) = &node.state else {
+                return Err("PLATFORM_RESOURCE_TYPE");
+            };
+            Ok(Output::Value(accessibility_state_data(
+                &window.accessibility,
+                None,
+            )))
         }
         Operation::InspectDraw => {
             require_count(arguments, 1)?;
@@ -873,6 +931,8 @@ fn protocol_info() -> Data {
         ("平台次", Data::Integer(PLATFORM_MINOR)),
         ("事件主", Data::Integer(EVENT_MAJOR)),
         ("事件次", Data::Integer(EVENT_MINOR)),
+        ("无障碍主", Data::Integer(ACCESSIBILITY_MAJOR)),
+        ("无障碍次", Data::Integer(ACCESSIBILITY_MINOR)),
         ("绘制主", Data::Integer(i64::from(protocol::DRAW_MAJOR))),
         ("绘制次", Data::Integer(i64::from(protocol::DRAW_MINOR))),
         ("ABI", Data::Integer(2)),
@@ -909,6 +969,27 @@ fn frame_submission_data(count: i64, submission: FrameSubmission) -> Data {
     ])
 }
 
+fn accessibility_state_data(state: &AccessibilityState, changed: Option<bool>) -> Data {
+    let mut result = BTreeMap::from([
+        ("修订".to_owned(), Data::Integer(state.revision())),
+        ("节点数".to_owned(), usize_data(state.node_count())),
+        ("文字字节".to_owned(), usize_data(state.text_bytes())),
+        (
+            "焦点".to_owned(),
+            state.focused().map_or(Data::Nil, Data::Integer),
+        ),
+    ]);
+    if let Some(changed) = changed {
+        result.insert("变化".to_owned(), Data::Bool(changed));
+    } else {
+        result.insert(
+            "树".to_owned(),
+            state.tree().map_or(Data::Nil, SemanticTree::to_data),
+        );
+    }
+    Data::Map(result)
+}
+
 fn capabilities() -> Data {
     Data::map([
         ("系统", Data::String(std::env::consts::OS.to_owned())),
@@ -943,6 +1024,22 @@ fn capabilities() -> Data {
         ("帧呈现反馈", Data::Bool(true)),
         ("帧时间基准", Data::String("进程内单调秒".to_owned())),
         ("动画驱动事件", Data::String("帧呈现".to_owned())),
+        ("无障碍语义树", Data::Bool(true)),
+        ("无障碍焦点请求", Data::Bool(true)),
+        ("无障碍动作请求", Data::Bool(true)),
+        ("原生无障碍桥", Data::Bool(false)),
+        ("无障碍节点上限", usize_data(MAX_SEMANTIC_NODES)),
+        ("无障碍深度上限", usize_data(MAX_SEMANTIC_DEPTH)),
+        ("无障碍单节点子上限", usize_data(MAX_SEMANTIC_CHILDREN)),
+        ("无障碍单节点操作上限", usize_data(MAX_SEMANTIC_ACTIONS)),
+        (
+            "无障碍单字段文字字节上限",
+            usize_data(MAX_SEMANTIC_NODE_TEXT_BYTES),
+        ),
+        ("无障碍文字字节上限", usize_data(MAX_SEMANTIC_TEXT_BYTES)),
+        ("无障碍角色", string_list(SEMANTIC_ROLES)),
+        ("无障碍状态", string_list(SEMANTIC_STATES)),
+        ("无障碍动作", string_list(SEMANTIC_ACTIONS)),
         ("Wayland", Data::Bool(cfg!(target_os = "linux"))),
         ("X11", Data::Bool(cfg!(target_os = "linux"))),
     ])
@@ -1131,6 +1228,7 @@ fn debug_snapshot(model: &Model) -> Data {
     let events = model.events.metrics();
     let resources = model.resource_metrics();
     let frames = model.frame_metrics();
+    let accessibility = model.accessibility_metrics();
     Data::map([
         ("应用", usize_data(model.count(ResourceKind::Application))),
         ("窗口", usize_data(model.count(ResourceKind::Window))),
@@ -1175,6 +1273,25 @@ fn debug_snapshot(model: &Model) -> Data {
                 ("失败总数", u64_data(frames.failed)),
             ]),
         ),
+        (
+            "无障碍统计",
+            Data::map([
+                ("当前树", usize_data(accessibility.current_trees)),
+                ("当前节点", usize_data(accessibility.current_nodes)),
+                ("节点高水位", usize_data(accessibility.nodes_high_watermark)),
+                ("当前文字字节", usize_data(accessibility.current_text_bytes)),
+                (
+                    "文字字节高水位",
+                    usize_data(accessibility.text_bytes_high_watermark),
+                ),
+                ("更新总数", u64_data(accessibility.updates)),
+                ("去重总数", u64_data(accessibility.unchanged)),
+                ("清除总数", u64_data(accessibility.cleared)),
+                ("焦点请求总数", u64_data(accessibility.focus_requests)),
+                ("动作请求总数", u64_data(accessibility.action_requests)),
+                ("拒绝总数", u64_data(accessibility.rejected)),
+            ]),
+        ),
     ])
 }
 
@@ -1184,6 +1301,15 @@ fn usize_data(value: usize) -> Data {
 
 fn u64_data(value: u64) -> Data {
     Data::Integer(i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+fn string_list(values: &[&str]) -> Data {
+    Data::Array(
+        values
+            .iter()
+            .map(|value| Data::String((*value).to_owned()))
+            .collect(),
+    )
 }
 
 fn display_data(display: &crate::model::DisplayState) -> Data {
@@ -1720,6 +1846,14 @@ mod tests {
             Data::Integer(EVENT_MINOR)
         );
         assert_eq!(
+            protocol_info().as_map().unwrap()["无障碍主"],
+            Data::Integer(ACCESSIBILITY_MAJOR)
+        );
+        assert_eq!(
+            protocol_info().as_map().unwrap()["无障碍次"],
+            Data::Integer(ACCESSIBILITY_MINOR)
+        );
+        assert_eq!(
             protocol_info().as_map().unwrap()["绘制次"],
             Data::Integer(i64::from(protocol::DRAW_MINOR))
         );
@@ -1756,6 +1890,35 @@ mod tests {
             Data::String("帧呈现".to_owned())
         );
         assert_eq!(
+            capabilities().as_map().unwrap()["无障碍语义树"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["无障碍焦点请求"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["无障碍动作请求"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["原生无障碍桥"],
+            Data::Bool(false)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["无障碍节点上限"],
+            Data::Integer(MAX_SEMANTIC_NODES as i64)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["无障碍文字字节上限"],
+            Data::Integer(MAX_SEMANTIC_TEXT_BYTES as i64)
+        );
+        let capability_data = capabilities();
+        let Data::Array(roles) = &capability_data.as_map().unwrap()["无障碍角色"] else {
+            panic!("accessibility roles expected")
+        };
+        assert!(roles.contains(&Data::String("按钮".to_owned())));
+        assert_eq!(
             capabilities().as_map().unwrap()["剪贴板文字"],
             Data::Bool(true)
         );
@@ -1775,6 +1938,36 @@ mod tests {
             capabilities().as_map().unwrap()["剪贴板图片格式"],
             Data::Array(vec![Data::String("RGBA8".to_owned())])
         );
+    }
+
+    #[test]
+    fn accessibility_updates_return_metadata_and_queries_return_the_tree() {
+        let tree = Data::map([
+            ("编号", Data::Integer(1)),
+            ("角色", Data::String("面板".to_owned())),
+            ("名称", Data::String("根".to_owned())),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 320.into(), 200.into()]),
+            ),
+        ]);
+        let mut state = AccessibilityState::default();
+        assert!(
+            state
+                .replace(Some(SemanticTree::validate(&tree).unwrap()))
+                .unwrap()
+        );
+        let update = accessibility_state_data(&state, Some(true));
+        let update = update.as_map().unwrap();
+        assert_eq!(update["修订"], Data::Integer(1));
+        assert_eq!(update["节点数"], Data::Integer(1));
+        assert_eq!(update["变化"], Data::Bool(true));
+        assert!(!update.contains_key("树"));
+
+        let query = accessibility_state_data(&state, None);
+        let query = query.as_map().unwrap();
+        assert_eq!(query["树"], state.tree().unwrap().to_data());
+        assert!(!query.contains_key("变化"));
     }
 
     #[test]
