@@ -59,6 +59,37 @@ impl Default for ResourceLimits {
     }
 }
 
+impl ResourceLimits {
+    pub fn validate(self) -> Result<Self, QuotaKind> {
+        let maximum = Self::default();
+        for (value, limit, kind) in [
+            (self.resources, maximum.resources, QuotaKind::Resources),
+            (self.windows, maximum.windows, QuotaKind::Windows),
+            (self.timers, maximum.timers, QuotaKind::Timers),
+            (self.images, maximum.images, QuotaKind::Images),
+            (self.fonts, maximum.fonts, QuotaKind::Fonts),
+            (self.image_bytes, maximum.image_bytes, QuotaKind::ImageBytes),
+            (self.font_bytes, maximum.font_bytes, QuotaKind::FontBytes),
+            (self.frame_bytes, maximum.frame_bytes, QuotaKind::FrameBytes),
+            (
+                self.accessibility_nodes,
+                maximum.accessibility_nodes,
+                QuotaKind::AccessibilityNodes,
+            ),
+            (
+                self.accessibility_text_bytes,
+                maximum.accessibility_text_bytes,
+                QuotaKind::AccessibilityTextBytes,
+            ),
+        ] {
+            if value > limit || (kind == QuotaKind::Resources && value == 0) {
+                return Err(kind);
+            }
+        }
+        Ok(self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResourceUsage {
     pub resources: usize,
@@ -363,6 +394,8 @@ pub enum ModelError {
     FrameSequence,
     Overflow,
     Quota(QuotaKind),
+    QuotaConfiguration(QuotaKind),
+    QuotaLocked,
 }
 
 impl Display for ModelError {
@@ -374,6 +407,10 @@ impl Display for ModelError {
             Self::FrameSequence => formatter.write_str("平台帧序号已耗尽"),
             Self::Overflow => formatter.write_str("平台资源编号已耗尽"),
             Self::Quota(kind) => write!(formatter, "平台应用{}配额已耗尽", kind.name()),
+            Self::QuotaConfiguration(kind) => {
+                write!(formatter, "平台应用{}配额配置无效", kind.name())
+            }
+            Self::QuotaLocked => formatter.write_str("平台应用资源配额已经冻结"),
         }
     }
 }
@@ -394,6 +431,8 @@ impl AccessibilityModelError {
             Self::Model(ModelError::Missing(_)) => "PLATFORM_RESOURCE_CLOSED",
             Self::Model(ModelError::Kind(_)) => "PLATFORM_RESOURCE_TYPE",
             Self::Model(ModelError::Quota(kind)) => kind.code(),
+            Self::Model(ModelError::QuotaConfiguration(_)) => "PLATFORM_QUOTA_CONFIG",
+            Self::Model(ModelError::QuotaLocked) => "PLATFORM_QUOTA_LOCKED",
             Self::Model(_) => "PLATFORM_RESOURCE",
             Self::Accessibility(error) => error.code(),
             Self::Queue(EventQueueError::Full) => "PLATFORM_QUEUE_FULL",
@@ -437,6 +476,7 @@ pub struct Model {
     next_id: u64,
     resources: BTreeMap<u64, ResourceNode>,
     resource_limits: ResourceLimits,
+    resource_limits_locked: bool,
     resource_usage: ResourceUsage,
     resource_metrics: ResourceMetrics,
     frame_metrics: FrameMetrics,
@@ -454,6 +494,7 @@ impl Default for Model {
             next_id: 1,
             resources: BTreeMap::new(),
             resource_limits: ResourceLimits::default(),
+            resource_limits_locked: false,
             resource_usage: ResourceUsage::default(),
             resource_metrics: ResourceMetrics::default(),
             frame_metrics: FrameMetrics::default(),
@@ -471,21 +512,24 @@ impl Model {
     #[must_use]
     pub fn with_limits(resource_limits: ResourceLimits) -> Self {
         Self {
-            resource_limits,
+            resource_limits: resource_limits
+                .validate()
+                .expect("model limits must not exceed application maxima"),
             ..Self::default()
         }
     }
 
     pub fn create(&mut self, parent: Option<u64>, state: ResourceState) -> Result<u64, ModelError> {
+        let kind = state.kind();
         if let Some(parent_id) = parent {
             let parent_node = self
                 .resources
                 .get(&parent_id)
                 .ok_or(ModelError::Missing(parent_id))?;
-            if !allowed_parent(parent_node.state.kind(), state.kind()) {
+            if !allowed_parent(parent_node.state.kind(), kind) {
                 return Err(ModelError::Parent(parent_id));
             }
-        } else if state.kind() != ResourceKind::Application {
+        } else if kind != ResourceKind::Application {
             return Err(ModelError::Parent(0));
         }
         let added_usage = state.usage();
@@ -502,6 +546,9 @@ impl Model {
             },
         );
         self.resource_usage = next_usage;
+        if kind != ResourceKind::Application {
+            self.resource_limits_locked = true;
+        }
         if let Some(parent_id) = parent {
             self.resources
                 .get_mut(&parent_id)
@@ -665,6 +712,30 @@ impl Model {
         self.resource_limits
     }
 
+    pub fn configure_resource_limits(
+        &mut self,
+        limits: ResourceLimits,
+    ) -> Result<ResourceLimits, ModelError> {
+        let limits = limits.validate().map_err(ModelError::QuotaConfiguration)?;
+        if self.resource_limits_locked || self.running {
+            return Err(ModelError::QuotaLocked);
+        }
+        if let Some(kind) = quota_exceeded(self.resource_usage, limits) {
+            return Err(ModelError::QuotaConfiguration(kind));
+        }
+        self.resource_limits = limits;
+        Ok(limits)
+    }
+
+    pub fn lock_resource_limits(&mut self) {
+        self.resource_limits_locked = true;
+    }
+
+    #[must_use]
+    pub const fn resource_limits_locked(&self) -> bool {
+        self.resource_limits_locked
+    }
+
     #[must_use]
     pub const fn resource_usage(&self) -> ResourceUsage {
         self.resource_usage
@@ -675,49 +746,8 @@ impl Model {
             .resource_usage
             .checked_add(added)
             .ok_or(ModelError::Quota(QuotaKind::Resources))?;
-        for (usage, limit, kind) in [
-            (
-                next.resources,
-                self.resource_limits.resources,
-                QuotaKind::Resources,
-            ),
-            (
-                next.windows,
-                self.resource_limits.windows,
-                QuotaKind::Windows,
-            ),
-            (next.timers, self.resource_limits.timers, QuotaKind::Timers),
-            (next.images, self.resource_limits.images, QuotaKind::Images),
-            (next.fonts, self.resource_limits.fonts, QuotaKind::Fonts),
-            (
-                next.image_bytes,
-                self.resource_limits.image_bytes,
-                QuotaKind::ImageBytes,
-            ),
-            (
-                next.font_bytes,
-                self.resource_limits.font_bytes,
-                QuotaKind::FontBytes,
-            ),
-            (
-                next.frame_bytes,
-                self.resource_limits.frame_bytes,
-                QuotaKind::FrameBytes,
-            ),
-            (
-                next.accessibility_nodes,
-                self.resource_limits.accessibility_nodes,
-                QuotaKind::AccessibilityNodes,
-            ),
-            (
-                next.accessibility_text_bytes,
-                self.resource_limits.accessibility_text_bytes,
-                QuotaKind::AccessibilityTextBytes,
-            ),
-        ] {
-            if usage > limit {
-                return Err(ModelError::Quota(kind));
-            }
+        if let Some(kind) = quota_exceeded(next, self.resource_limits) {
+            return Err(ModelError::Quota(kind));
         }
         Ok(next)
     }
@@ -1087,6 +1117,31 @@ impl Model {
     }
 }
 
+fn quota_exceeded(usage: ResourceUsage, limits: ResourceLimits) -> Option<QuotaKind> {
+    [
+        (usage.resources, limits.resources, QuotaKind::Resources),
+        (usage.windows, limits.windows, QuotaKind::Windows),
+        (usage.timers, limits.timers, QuotaKind::Timers),
+        (usage.images, limits.images, QuotaKind::Images),
+        (usage.fonts, limits.fonts, QuotaKind::Fonts),
+        (usage.image_bytes, limits.image_bytes, QuotaKind::ImageBytes),
+        (usage.font_bytes, limits.font_bytes, QuotaKind::FontBytes),
+        (usage.frame_bytes, limits.frame_bytes, QuotaKind::FrameBytes),
+        (
+            usage.accessibility_nodes,
+            limits.accessibility_nodes,
+            QuotaKind::AccessibilityNodes,
+        ),
+        (
+            usage.accessibility_text_bytes,
+            limits.accessibility_text_bytes,
+            QuotaKind::AccessibilityTextBytes,
+        ),
+    ]
+    .into_iter()
+    .find_map(|(value, limit, kind)| (value > limit).then_some(kind))
+}
+
 const fn allowed_parent(parent: ResourceKind, child: ResourceKind) -> bool {
     matches!(
         (parent, child),
@@ -1237,6 +1292,67 @@ mod tests {
         assert_eq!(replacement, timer + 1);
         model.close(application).unwrap();
         assert_eq!(model.resource_usage(), ResourceUsage::default());
+    }
+
+    #[test]
+    fn configures_lower_quotas_until_the_first_child_is_created() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        let limits = ResourceLimits {
+            resources: 2,
+            windows: 1,
+            timers: 0,
+            images: 0,
+            fonts: 0,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(model.configure_resource_limits(limits), Ok(limits));
+        assert_eq!(model.resource_limits(), limits);
+        assert!(!model.resource_limits_locked());
+
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        assert!(model.resource_limits_locked());
+        model.close(window).unwrap();
+        assert_eq!(
+            model.configure_resource_limits(ResourceLimits::default()),
+            Err(ModelError::QuotaLocked)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_running_application_quota_configuration() {
+        let mut model = Model::default();
+        app(&mut model);
+        let limits = ResourceLimits {
+            resources: 0,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(
+            model.configure_resource_limits(limits),
+            Err(ModelError::QuotaConfiguration(QuotaKind::Resources))
+        );
+        let limits = ResourceLimits {
+            windows: MAX_APPLICATION_WINDOWS + 1,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(
+            model.configure_resource_limits(limits),
+            Err(ModelError::QuotaConfiguration(QuotaKind::Windows))
+        );
+
+        model.running = true;
+        assert_eq!(
+            model.configure_resource_limits(ResourceLimits::default()),
+            Err(ModelError::QuotaLocked)
+        );
+        model.running = false;
+        model.lock_resource_limits();
+        assert_eq!(
+            model.configure_resource_limits(ResourceLimits::default()),
+            Err(ModelError::QuotaLocked)
+        );
     }
 
     #[test]

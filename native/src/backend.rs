@@ -1692,6 +1692,8 @@ const fn frame_model_error(error: crate::model::ModelError) -> &'static str {
         crate::model::ModelError::Kind(_) => "PLATFORM_RESOURCE_TYPE",
         crate::model::ModelError::FrameSequence => "PLATFORM_FRAME_SEQUENCE",
         crate::model::ModelError::Quota(kind) => kind.code(),
+        crate::model::ModelError::QuotaConfiguration(_) => "PLATFORM_QUOTA_CONFIG",
+        crate::model::ModelError::QuotaLocked => "PLATFORM_QUOTA_LOCKED",
         crate::model::ModelError::Parent(_) | crate::model::ModelError::Overflow => {
             "PLATFORM_RESOURCE"
         }

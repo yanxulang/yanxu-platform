@@ -90,6 +90,7 @@ pub fn run(
         if model.application_exit_requested(application_id).is_none() {
             return Err("PLATFORM_RESOURCE_CLOSED");
         }
+        model.lock_resource_limits();
         model.running = true;
     }
     let _running = RunningGuard {
