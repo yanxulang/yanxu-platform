@@ -1025,6 +1025,8 @@ fn capabilities() -> Data {
             string_list(&["就绪", "运行中", "退出请求", "已退出", "已关闭"]),
         ),
         ("应用退出幂等", Data::Bool(true)),
+        ("应用生命周期统计", Data::Bool(true)),
+        ("应用关闭资源归零", Data::Bool(true)),
         (
             "应用资源硬上限",
             resource_limits_data(ResourceLimits::default()),
@@ -1245,6 +1247,7 @@ fn window_snapshot(resource: &PlatformResource) -> Result<Data, &'static str> {
 fn debug_snapshot(model: &Model) -> Data {
     let events = model.events.metrics();
     let resources = model.resource_metrics();
+    let application_metrics = model.application_metrics();
     let resource_limits = model.resource_limits();
     let resource_usage = model.resource_usage();
     let quota_metrics = model.quota_metrics();
@@ -1280,6 +1283,26 @@ fn debug_snapshot(model: &Model) -> Data {
                 ("拒绝总数", u64_data(events.rejected)),
                 ("批次总数", u64_data(events.batches)),
                 ("排出总数", u64_data(events.drained)),
+            ]),
+        ),
+        (
+            "应用生命周期统计",
+            Data::map([
+                ("运行开始总数", u64_data(application_metrics.runs_started)),
+                ("退出请求总数", u64_data(application_metrics.exit_requests)),
+                (
+                    "重复退出总数",
+                    u64_data(application_metrics.duplicate_exit_requests),
+                ),
+                ("退出完成总数", u64_data(application_metrics.exits)),
+                ("正常退出总数", u64_data(application_metrics.normal_exits)),
+                ("失败退出总数", u64_data(application_metrics.failed_exits)),
+                ("应用关闭总数", u64_data(application_metrics.closes)),
+                (
+                    "回收资源总数",
+                    u64_data(application_metrics.resources_reclaimed),
+                ),
+                ("资源归零总数", u64_data(application_metrics.zeroed_closes)),
             ]),
         ),
         (
@@ -2216,6 +2239,14 @@ mod tests {
             Data::Bool(true)
         );
         assert_eq!(
+            capabilities().as_map().unwrap()["应用生命周期统计"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["应用关闭资源归零"],
+            Data::Bool(true)
+        );
+        assert_eq!(
             capabilities().as_map().unwrap()["应用资源硬上限"],
             resource_limits_data(ResourceLimits::default())
         );
@@ -2361,6 +2392,11 @@ mod tests {
         assert_eq!(snapshot["应用状态"], Data::String("就绪".to_owned()));
         assert_eq!(snapshot["运行中"], Data::Bool(false));
         assert_eq!(snapshot["退出错误"], Data::Nil);
+        let lifecycle = snapshot["应用生命周期统计"].as_map().unwrap();
+        assert_eq!(lifecycle["运行开始总数"], Data::Integer(0));
+        assert_eq!(lifecycle["退出请求总数"], Data::Integer(0));
+        assert_eq!(lifecycle["重复退出总数"], Data::Integer(0));
+        assert_eq!(lifecycle["资源归零总数"], Data::Integer(0));
         let events = snapshot["事件队列"].as_map().unwrap();
         assert_eq!(events["接收总数"], Data::Integer(2));
         assert_eq!(events["合并总数"], Data::Integer(1));

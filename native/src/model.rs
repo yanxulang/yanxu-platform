@@ -311,6 +311,19 @@ impl ApplicationState {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApplicationLifecycleMetrics {
+    pub runs_started: u64,
+    pub exit_requests: u64,
+    pub duplicate_exit_requests: u64,
+    pub exits: u64,
+    pub normal_exits: u64,
+    pub failed_exits: u64,
+    pub closes: u64,
+    pub resources_reclaimed: u64,
+    pub zeroed_closes: u64,
+}
+
 impl Default for WindowState {
     fn default() -> Self {
         Self {
@@ -600,6 +613,7 @@ pub struct Model {
     resource_usage: ResourceUsage,
     quota_metrics: QuotaMetrics,
     resource_metrics: ResourceMetrics,
+    application_metrics: ApplicationLifecycleMetrics,
     frame_metrics: FrameMetrics,
     accessibility_metrics: AccessibilityMetrics,
     active_accessibility_bridges: BTreeSet<u64>,
@@ -618,6 +632,7 @@ impl Default for Model {
             resource_usage: ResourceUsage::default(),
             quota_metrics: QuotaMetrics::default(),
             resource_metrics: ResourceMetrics::default(),
+            application_metrics: ApplicationLifecycleMetrics::default(),
             frame_metrics: FrameMetrics::default(),
             accessibility_metrics: AccessibilityMetrics::default(),
             active_accessibility_bridges: BTreeSet::new(),
@@ -840,19 +855,33 @@ impl Model {
             application.exit_error = None;
         }
         self.resource_limits_locked = true;
+        self.application_metrics.runs_started =
+            self.application_metrics.runs_started.saturating_add(1);
         Ok(())
     }
 
     pub fn finish_application_run(&mut self, id: u64, error: Option<&'static str>) {
-        let Ok(node) = self.get_mut(id) else {
-            return;
-        };
-        let ResourceState::Application(application) = &mut node.state else {
-            return;
-        };
-        application.event_loop_active = false;
-        application.lifecycle = ApplicationLifecycle::Exited;
-        application.exit_error = error;
+        {
+            let Ok(node) = self.get_mut(id) else {
+                return;
+            };
+            let ResourceState::Application(application) = &mut node.state else {
+                return;
+            };
+            if !application.event_loop_active {
+                return;
+            }
+            application.event_loop_active = false;
+            application.lifecycle = ApplicationLifecycle::Exited;
+            application.exit_error = error;
+        }
+        let metrics = &mut self.application_metrics;
+        metrics.exits = metrics.exits.saturating_add(1);
+        if error.is_some() {
+            metrics.failed_exits = metrics.failed_exits.saturating_add(1);
+        } else {
+            metrics.normal_exits = metrics.normal_exits.saturating_add(1);
+        }
     }
 
     pub fn request_application_exit(&mut self, id: u64) -> Result<bool, ModelError> {
@@ -864,9 +893,15 @@ impl Model {
             application.lifecycle,
             ApplicationLifecycle::ExitRequested | ApplicationLifecycle::Exited
         ) {
+            self.application_metrics.duplicate_exit_requests = self
+                .application_metrics
+                .duplicate_exit_requests
+                .saturating_add(1);
             return Ok(false);
         }
         application.lifecycle = ApplicationLifecycle::ExitRequested;
+        self.application_metrics.exit_requests =
+            self.application_metrics.exit_requests.saturating_add(1);
         Ok(true)
     }
 
@@ -874,6 +909,10 @@ impl Model {
         if !self.resources.contains_key(&id) {
             return Err(ModelError::Missing(id));
         }
+        let closing_application = self
+            .resources
+            .get(&id)
+            .is_some_and(|node| matches!(node.state, ResourceState::Application(_)));
         let mut order = Vec::new();
         self.collect_close_order(id, &mut order);
         let pending_frames = order
@@ -956,6 +995,16 @@ impl Model {
             .accessibility_metrics
             .native_bridge_deactivations
             .saturating_add(active_accessibility_bridges as u64);
+        if closing_application {
+            let metrics = &mut self.application_metrics;
+            metrics.closes = metrics.closes.saturating_add(1);
+            metrics.resources_reclaimed = metrics
+                .resources_reclaimed
+                .saturating_add(u64::try_from(order.len()).unwrap_or(u64::MAX));
+            if self.resource_usage == ResourceUsage::default() {
+                metrics.zeroed_closes = metrics.zeroed_closes.saturating_add(1);
+            }
+        }
         Ok(order)
     }
 
@@ -970,6 +1019,11 @@ impl Model {
     #[must_use]
     pub const fn resource_metrics(&self) -> ResourceMetrics {
         self.resource_metrics
+    }
+
+    #[must_use]
+    pub const fn application_metrics(&self) -> ApplicationLifecycleMetrics {
+        self.application_metrics
     }
 
     #[must_use]
@@ -1932,6 +1986,7 @@ mod tests {
         assert!(model.event_loop_active());
 
         model.finish_application_run(application, Some("PLATFORM_PRESENT"));
+        model.finish_application_run(application, None);
         assert_eq!(
             model.application_lifecycle(application),
             ApplicationLifecycle::Exited
@@ -1954,6 +2009,20 @@ mod tests {
             ApplicationLifecycle::Closed
         );
         assert_eq!(model.application_exit_error(), None);
+        assert_eq!(
+            model.application_metrics(),
+            ApplicationLifecycleMetrics {
+                runs_started: 1,
+                exit_requests: 1,
+                duplicate_exit_requests: 2,
+                exits: 1,
+                failed_exits: 1,
+                closes: 1,
+                resources_reclaimed: 1,
+                zeroed_closes: 1,
+                ..ApplicationLifecycleMetrics::default()
+            }
+        );
     }
 
     #[test]
