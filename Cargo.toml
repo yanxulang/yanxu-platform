@@ -11,6 +11,9 @@ rust-version = "1.92"
 repository = "https://github.com/yanxulang/yanxu-platform"
 
 [patch.crates-io]
+# fontdb 0.23.0 仍依赖已经停止维护的 ttf-parser；固定采用上游已合并的
+# PR #92，只内联字体发现所需的最小解析子集。上游发布正式版本后改回 crates.io。
+fontdb = { git = "https://github.com/RazrFalcon/fontdb", rev = "aaf5220300454ce30d07fb88d9722927521b7799" }
 # wayland-scanner 0.31.10 尚固定在有漏洞的 quick-xml 0.39；复用其已发布
 # 源码并只升级 XML 解析器，保持 Wayland 生成接口不变。
 wayland-scanner = { path = "vendor/wayland-scanner" }

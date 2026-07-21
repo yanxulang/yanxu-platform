@@ -39,19 +39,23 @@ RUSTSEC-2026-0194 与 RUSTSEC-2026-0195 影响。`vendor/wayland-scanner` 保留
 `xml10_content` API。补丁不改变生成协议或公开接口；Linux CI 会重新编译并验证
 Wayland 与 X11 功能集合。上游发布兼容修复后应移除此临时补丁。
 
-## 有时限的维护例外
+## fontdb 上游修复固定
 
-`fontdb 0.23.0` 仍传递依赖 `ttf-parser 0.25.1`，RustSec 将整个项目标记为停止维护
-（RUSTSEC-2026-0192），但截至 2026-07-20 没有已知漏洞、内存不安全或撤回版本；该
-解析器禁止不安全 Rust。言台只在有界字体载入路径和系统字体发现中使用它。因此
-`deny.toml` 只对这一项“停止维护”公告给出带理由例外，不忽略漏洞或不健全公告。
-每次发布都必须重新审查；`cosmic-text/fontdb` 完成向 Skrifa 的迁移后立即取消例外。
+`fontdb 0.23.0` 的 crates.io 包仍传递依赖已经停止维护的 `ttf-parser 0.25.1`
+（RUSTSEC-2026-0192）。言台不再忽略该公告，而是通过 `[patch.crates-io]` 固定到
+`fontdb` 上游已合并并获批准的 PR #92 合并提交
+`aaf5220300454ce30d07fb88d9722927521b7799`。该提交把字体发现所需的名称、语言和 OS/2
+解析最小子集纳入仍在维护的 `fontdb`，并从依赖图移除 `ttf-parser`。
+
+`deny.toml` 只允许 `https://github.com/RazrFalcon/fontdb` 这一 Git 来源，并强制所有 Git
+依赖使用完整 `rev` 规格；锁文件再固定实际提交。上游已说明将发布包含该修复的新版本，
+正式包可用后必须切回 crates.io 并删除 Git 来源许可。
 
 ## 发布门禁
 
 ```sh
 cargo deny --manifest-path yanxu-platform/Cargo.toml check advisories licenses sources
-cargo audit --file yanxu-platform/Cargo.lock --deny warnings --ignore RUSTSEC-2026-0192
+cargo audit --file yanxu-platform/Cargo.lock --deny warnings
 ```
 
 项目许可全文位于 `LICENSE-MIT` 与 `LICENSE-APACHE`。发布包必须同时携带这两份许可、

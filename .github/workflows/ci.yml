@@ -166,7 +166,7 @@ jobs:
       - name: 检查六目标来源、许可与公告
         run: |
           cargo deny check advisories licenses sources
-          cargo audit --file Cargo.lock --deny warnings --ignore RUSTSEC-2026-0192
+          cargo audit --file Cargo.lock --deny warnings
 
   performance-budget:
     name: Release 性能预算
