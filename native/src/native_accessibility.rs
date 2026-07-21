@@ -2,6 +2,7 @@
 
 use crate::accessibility::{AccessibilityState, SemanticNode};
 use crate::data::Data;
+use crate::model::Model;
 use crate::sync::RecoverMutex;
 use accesskit::{
     Action, ActionData, ActionRequest, ActivationHandler, AriaCurrent, CustomAction, Invalid, Node,
@@ -94,16 +95,29 @@ impl NativeTreeSnapshot {
 
 pub(crate) struct NativeActivationHandler {
     snapshot: Arc<Mutex<NativeTreeSnapshot>>,
+    model: Arc<Mutex<Model>>,
+    window_id: u64,
 }
 
 impl NativeActivationHandler {
-    pub(crate) fn new(snapshot: Arc<Mutex<NativeTreeSnapshot>>) -> Self {
-        Self { snapshot }
+    pub(crate) fn new(
+        snapshot: Arc<Mutex<NativeTreeSnapshot>>,
+        model: Arc<Mutex<Model>>,
+        window_id: u64,
+    ) -> Self {
+        Self {
+            snapshot,
+            model,
+            window_id,
+        }
     }
 }
 
 impl ActivationHandler for NativeActivationHandler {
     fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
+        self.model
+            .lock_recover()
+            .record_accessibility_bridge_activation(self.window_id);
         Some(self.snapshot.lock_recover().full_update())
     }
 }
@@ -653,6 +667,7 @@ fn state_bool(states: &BTreeMap<String, Data>, name: &str) -> Option<bool> {
 mod tests {
     use super::*;
     use crate::accessibility::{SEMANTIC_ACTIONS, SEMANTIC_ROLES, SemanticTree};
+    use crate::model::ResourceState;
     use accesskit::{ScrollHint, TextPosition, TextSelection};
 
     fn semantic_node(
@@ -1031,6 +1046,20 @@ mod tests {
 
     #[test]
     fn activation_reads_the_latest_thread_safe_snapshot() {
+        let mut model = Model::default();
+        let application = model
+            .create(
+                None,
+                ResourceState::Application {
+                    name: "测试".to_owned(),
+                    exit_requested: false,
+                },
+            )
+            .unwrap();
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let model = Arc::new(Mutex::new(model));
         let snapshot = Arc::new(Mutex::new(NativeTreeSnapshot::new(
             "初始",
             [10, 20],
@@ -1038,8 +1067,9 @@ mod tests {
             &AccessibilityState::default(),
         )));
         let first_snapshot = Arc::clone(&snapshot);
+        let first_model = Arc::clone(&model);
         let first = std::thread::spawn(move || {
-            NativeActivationHandler::new(first_snapshot)
+            NativeActivationHandler::new(first_snapshot, first_model, window)
                 .request_initial_tree()
                 .unwrap()
         })
@@ -1063,7 +1093,7 @@ mod tests {
         snapshot
             .lock_recover()
             .replace("更新", [30, 40], 2.0, &state);
-        let second = NativeActivationHandler::new(snapshot)
+        let second = NativeActivationHandler::new(snapshot, Arc::clone(&model), window)
             .request_initial_tree()
             .unwrap();
         assert_eq!(converted_node(&second, 0).label(), Some("更新"));
@@ -1072,6 +1102,9 @@ mod tests {
             converted_node(&second, 1).bounds(),
             Some(Rect::new(2.0, 4.0, 8.0, 12.0))
         );
+        let metrics = model.lock_recover().accessibility_metrics();
+        assert_eq!(metrics.native_bridges_active, 1);
+        assert_eq!(metrics.native_bridge_activations, 1);
     }
 
     #[test]

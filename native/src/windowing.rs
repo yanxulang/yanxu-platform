@@ -129,6 +129,7 @@ struct NativeWindow {
     accessibility_adapter: AccessibilityAdapter,
     window: Arc<Window>,
     accessibility_snapshot: Arc<Mutex<NativeTreeSnapshot>>,
+    model: Arc<Mutex<Model>>,
     accessibility_physical_size: [u32; 2],
     accessibility_scale_factor: f64,
     applied: WindowState,
@@ -390,7 +391,11 @@ impl Runner {
         let accessibility_adapter = AccessibilityAdapter::with_mixed_handlers(
             event_loop,
             &window,
-            NativeActivationHandler::new(Arc::clone(&accessibility_snapshot)),
+            NativeActivationHandler::new(
+                Arc::clone(&accessibility_snapshot),
+                Arc::clone(&self.model),
+                model_id,
+            ),
             self.event_loop_proxy.clone(),
         );
         let applied = WindowState {
@@ -402,6 +407,7 @@ impl Runner {
             accessibility_adapter,
             window,
             accessibility_snapshot,
+            model: Arc::clone(&self.model),
             accessibility_physical_size,
             accessibility_scale_factor: scale,
             applied,
@@ -1034,8 +1040,16 @@ impl ApplicationHandler<UserEvent> for Runner {
                     self.fail("PLATFORM_QUEUE_FULL");
                 }
             }
-            AccessibilityWindowEvent::InitialTreeRequested
-            | AccessibilityWindowEvent::AccessibilityDeactivated => {}
+            AccessibilityWindowEvent::AccessibilityDeactivated => self
+                .model
+                .lock_recover()
+                .record_accessibility_bridge_deactivation(model_id),
+            AccessibilityWindowEvent::InitialTreeRequested => {
+                let mut model = self.model.lock_recover();
+                model.record_accessibility_native_request();
+                model.record_accessibility_native_rejection();
+                model.record_accessibility_rejection();
+            }
         }
     }
 
@@ -1151,9 +1165,11 @@ fn sync_accessibility(native: &mut NativeWindow, state: &WindowState) {
         &state.accessibility,
     );
     let snapshot = Arc::clone(&native.accessibility_snapshot);
-    native
-        .accessibility_adapter
-        .update_if_active(move || snapshot.lock_recover().full_update());
+    let model = Arc::clone(&native.model);
+    native.accessibility_adapter.update_if_active(move || {
+        model.lock_recover().record_accessibility_native_tree_sync();
+        snapshot.lock_recover().full_update()
+    });
 }
 
 fn dispatch_accessibility_request(
@@ -1161,6 +1177,7 @@ fn dispatch_accessibility_request(
     window_id: u64,
     request: &accesskit::ActionRequest,
 ) -> Result<(), &'static str> {
+    model.record_accessibility_native_request();
     let translated = (|| {
         let node = model
             .get(window_id)
@@ -1175,6 +1192,7 @@ fn dispatch_accessibility_request(
         Ok(request) => request,
         Err(code) => {
             model.record_accessibility_rejection();
+            model.record_accessibility_native_rejection();
             return Err(code);
         }
     };
@@ -1198,7 +1216,10 @@ fn dispatch_accessibility_request(
             monotonic_seconds(),
         ),
     };
-    result.map_err(|error| error.code())
+    result.map_err(|error| {
+        model.record_accessibility_native_rejection();
+        error.code()
+    })
 }
 
 fn display_state(monitor: &MonitorHandle, primary: Option<&MonitorHandle>) -> DisplayState {
@@ -1510,5 +1531,7 @@ mod tests {
         );
         assert_eq!(model.accessibility_metrics().action_requests, 1);
         assert_eq!(model.accessibility_metrics().rejected, 2);
+        assert_eq!(model.accessibility_metrics().native_requests, 3);
+        assert_eq!(model.accessibility_metrics().native_rejected, 2);
     }
 }

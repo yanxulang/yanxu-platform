@@ -170,6 +170,13 @@ pub struct AccessibilityMetrics {
     pub focus_requests: u64,
     pub action_requests: u64,
     pub rejected: u64,
+    pub native_bridges_active: usize,
+    pub native_bridges_high_watermark: usize,
+    pub native_bridge_activations: u64,
+    pub native_bridge_deactivations: u64,
+    pub native_tree_syncs: u64,
+    pub native_requests: u64,
+    pub native_rejected: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -260,6 +267,7 @@ pub struct Model {
     resource_metrics: ResourceMetrics,
     frame_metrics: FrameMetrics,
     accessibility_metrics: AccessibilityMetrics,
+    active_accessibility_bridges: BTreeSet<u64>,
     pub events: EventBatcher,
     pub running: bool,
     pub displays: Vec<DisplayState>,
@@ -274,6 +282,7 @@ impl Default for Model {
             resource_metrics: ResourceMetrics::default(),
             frame_metrics: FrameMetrics::default(),
             accessibility_metrics: AccessibilityMetrics::default(),
+            active_accessibility_bridges: BTreeSet::new(),
             events: EventBatcher::default(),
             running: false,
             displays: Vec::new(),
@@ -398,6 +407,10 @@ impl Model {
                     totals.2.saturating_add(values.2),
                 )
             });
+        let active_accessibility_bridges = order
+            .iter()
+            .filter(|closing| self.active_accessibility_bridges.remove(closing))
+            .count();
         for closing in &order {
             if let Some(node) = self.resources.remove(closing)
                 && let Some(parent) = node.parent
@@ -424,6 +437,14 @@ impl Model {
             .accessibility_metrics
             .current_text_bytes
             .saturating_sub(accessibility_text_bytes);
+        self.accessibility_metrics.native_bridges_active = self
+            .accessibility_metrics
+            .native_bridges_active
+            .saturating_sub(active_accessibility_bridges);
+        self.accessibility_metrics.native_bridge_deactivations = self
+            .accessibility_metrics
+            .native_bridge_deactivations
+            .saturating_add(active_accessibility_bridges as u64);
         Ok(order)
     }
 
@@ -571,6 +592,47 @@ impl Model {
 
     pub fn record_accessibility_rejection(&mut self) {
         self.accessibility_metrics.rejected = self.accessibility_metrics.rejected.saturating_add(1);
+    }
+
+    pub fn record_accessibility_bridge_activation(&mut self, window_id: u64) {
+        let is_window = self
+            .resources
+            .get(&window_id)
+            .is_some_and(|node| matches!(node.state, ResourceState::Window(_)));
+        if is_window && self.active_accessibility_bridges.insert(window_id) {
+            let metrics = &mut self.accessibility_metrics;
+            metrics.native_bridges_active = metrics.native_bridges_active.saturating_add(1);
+            metrics.native_bridges_high_watermark = metrics
+                .native_bridges_high_watermark
+                .max(metrics.native_bridges_active);
+            metrics.native_bridge_activations = metrics.native_bridge_activations.saturating_add(1);
+        }
+    }
+
+    pub fn record_accessibility_bridge_deactivation(&mut self, window_id: u64) {
+        if self.active_accessibility_bridges.remove(&window_id) {
+            let metrics = &mut self.accessibility_metrics;
+            metrics.native_bridges_active = metrics.native_bridges_active.saturating_sub(1);
+            metrics.native_bridge_deactivations =
+                metrics.native_bridge_deactivations.saturating_add(1);
+        }
+    }
+
+    pub fn record_accessibility_native_tree_sync(&mut self) {
+        self.accessibility_metrics.native_tree_syncs = self
+            .accessibility_metrics
+            .native_tree_syncs
+            .saturating_add(1);
+    }
+
+    pub fn record_accessibility_native_request(&mut self) {
+        self.accessibility_metrics.native_requests =
+            self.accessibility_metrics.native_requests.saturating_add(1);
+    }
+
+    pub fn record_accessibility_native_rejection(&mut self) {
+        self.accessibility_metrics.native_rejected =
+            self.accessibility_metrics.native_rejected.saturating_add(1);
     }
 
     pub fn request_accessibility_focus(
@@ -1136,6 +1198,41 @@ mod tests {
         assert_eq!(metrics.current_text_bytes, 0);
         assert_eq!(metrics.nodes_high_watermark, 2);
         assert_eq!(metrics.updates, 3);
+    }
+
+    #[test]
+    fn tracks_native_accessibility_bridge_lifecycle_and_requests() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        let first = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let second = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+
+        model.record_accessibility_bridge_activation(first);
+        model.record_accessibility_bridge_activation(first);
+        model.record_accessibility_bridge_activation(second);
+        model.record_accessibility_bridge_deactivation(first);
+        model.record_accessibility_bridge_deactivation(first);
+        model.record_accessibility_native_tree_sync();
+        model.record_accessibility_native_request();
+        model.record_accessibility_native_rejection();
+
+        let metrics = model.accessibility_metrics();
+        assert_eq!(metrics.native_bridges_active, 1);
+        assert_eq!(metrics.native_bridges_high_watermark, 2);
+        assert_eq!(metrics.native_bridge_activations, 2);
+        assert_eq!(metrics.native_bridge_deactivations, 1);
+        assert_eq!(metrics.native_tree_syncs, 1);
+        assert_eq!(metrics.native_requests, 1);
+        assert_eq!(metrics.native_rejected, 1);
+
+        model.close(application).unwrap();
+        let metrics = model.accessibility_metrics();
+        assert_eq!(metrics.native_bridges_active, 0);
+        assert_eq!(metrics.native_bridge_deactivations, 2);
     }
 
     #[test]
