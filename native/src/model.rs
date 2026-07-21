@@ -15,6 +15,7 @@ pub const MAX_APPLICATION_IMAGES: usize = 256;
 pub const MAX_APPLICATION_FONTS: usize = 64;
 pub const MAX_APPLICATION_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_APPLICATION_FONT_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_APPLICATION_FRAME_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
@@ -34,6 +35,7 @@ pub struct ResourceLimits {
     pub fonts: usize,
     pub image_bytes: usize,
     pub font_bytes: usize,
+    pub frame_bytes: usize,
 }
 
 impl Default for ResourceLimits {
@@ -46,6 +48,7 @@ impl Default for ResourceLimits {
             fonts: MAX_APPLICATION_FONTS,
             image_bytes: MAX_APPLICATION_IMAGE_BYTES,
             font_bytes: MAX_APPLICATION_FONT_BYTES,
+            frame_bytes: MAX_APPLICATION_FRAME_BYTES,
         }
     }
 }
@@ -59,6 +62,7 @@ pub struct ResourceUsage {
     pub fonts: usize,
     pub image_bytes: usize,
     pub font_bytes: usize,
+    pub frame_bytes: usize,
 }
 
 impl ResourceUsage {
@@ -71,6 +75,7 @@ impl ResourceUsage {
             fonts: self.fonts.checked_add(other.fonts)?,
             image_bytes: self.image_bytes.checked_add(other.image_bytes)?,
             font_bytes: self.font_bytes.checked_add(other.font_bytes)?,
+            frame_bytes: self.frame_bytes.checked_add(other.frame_bytes)?,
         })
     }
 
@@ -83,6 +88,7 @@ impl ResourceUsage {
             fonts: self.fonts.checked_sub(other.fonts)?,
             image_bytes: self.image_bytes.checked_sub(other.image_bytes)?,
             font_bytes: self.font_bytes.checked_sub(other.font_bytes)?,
+            frame_bytes: self.frame_bytes.checked_sub(other.frame_bytes)?,
         })
     }
 }
@@ -96,6 +102,7 @@ pub enum QuotaKind {
     Fonts,
     ImageBytes,
     FontBytes,
+    FrameBytes,
 }
 
 impl QuotaKind {
@@ -109,6 +116,7 @@ impl QuotaKind {
             Self::Fonts => "PLATFORM_QUOTA_FONTS",
             Self::ImageBytes => "PLATFORM_QUOTA_IMAGE_BYTES",
             Self::FontBytes => "PLATFORM_QUOTA_FONT_BYTES",
+            Self::FrameBytes => "PLATFORM_QUOTA_FRAME_BYTES",
         }
     }
 
@@ -121,6 +129,7 @@ impl QuotaKind {
             Self::Fonts => "字体数",
             Self::ImageBytes => "图片字节",
             Self::FontBytes => "字体字节",
+            Self::FrameBytes => "帧字节",
         }
     }
 }
@@ -243,7 +252,10 @@ impl ResourceState {
         };
         match self {
             Self::Application { .. } => {}
-            Self::Window(_) => usage.windows = 1,
+            Self::Window(window) => {
+                usage.windows = 1;
+                usage.frame_bytes = window.frame.len();
+            }
             Self::Timer(_) => usage.timers = 1,
             Self::Image { rgba, .. } => {
                 usage.images = 1;
@@ -659,6 +671,11 @@ impl Model {
                 self.resource_limits.font_bytes,
                 QuotaKind::FontBytes,
             ),
+            (
+                next.frame_bytes,
+                self.resource_limits.frame_bytes,
+                QuotaKind::FrameBytes,
+            ),
         ] {
             if usage > limit {
                 return Err(ModelError::Quota(kind));
@@ -674,6 +691,22 @@ impl Model {
         submitted_at_seconds: f64,
     ) -> Result<FrameSubmission, ModelError> {
         let bytes = frame.len();
+        let previous_bytes = {
+            let node = self.get(id)?;
+            let ResourceState::Window(window) = &node.state else {
+                return Err(ModelError::Kind(id));
+            };
+            window.frame.len()
+        };
+        let next_frame_bytes = self
+            .resource_usage
+            .frame_bytes
+            .checked_sub(previous_bytes)
+            .and_then(|current| current.checked_add(bytes))
+            .ok_or(ModelError::Quota(QuotaKind::FrameBytes))?;
+        if next_frame_bytes > self.resource_limits.frame_bytes {
+            return Err(ModelError::Quota(QuotaKind::FrameBytes));
+        }
         let (generation, replaced_sequence) = {
             let node = self.get_mut(id)?;
             let ResourceState::Window(window) = &mut node.state else {
@@ -692,6 +725,7 @@ impl Model {
             window.redraw_requested = true;
             (generation, replaced_sequence)
         };
+        self.resource_usage.frame_bytes = next_frame_bytes;
         self.frame_metrics.submitted = self.frame_metrics.submitted.saturating_add(1);
         self.frame_metrics.bytes_high_watermark =
             self.frame_metrics.bytes_high_watermark.max(bytes);
@@ -1072,6 +1106,7 @@ mod tests {
             fonts: 0,
             image_bytes: 0,
             font_bytes: 0,
+            frame_bytes: 0,
         };
         let mut model = Model::with_limits(limits);
         let application = app(&mut model);
@@ -1134,6 +1169,7 @@ mod tests {
             fonts: 0,
             image_bytes: 16,
             font_bytes: 16,
+            frame_bytes: 16,
         };
         let mut model = Model::with_limits(limits);
         let application = app(&mut model);
@@ -1190,6 +1226,7 @@ mod tests {
             fonts: 2,
             image_bytes: 4,
             font_bytes: 3,
+            frame_bytes: 0,
         };
         let mut model = Model::with_limits(limits);
         let application = app(&mut model);
@@ -1365,6 +1402,63 @@ mod tests {
         model.close(application).unwrap();
         assert_eq!(model.frame_metrics().pending, 0);
         assert_eq!(model.frame_metrics().failed, 1);
+    }
+
+    #[test]
+    fn bounds_total_retained_frame_bytes_and_preserves_the_previous_frame() {
+        let limits = ResourceLimits {
+            resources: 4,
+            windows: 2,
+            timers: 0,
+            images: 0,
+            fonts: 0,
+            image_bytes: 0,
+            font_bytes: 0,
+            frame_bytes: 5,
+        };
+        let mut model = Model::with_limits(limits);
+        let application = app(&mut model);
+        let first_window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let second_window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+
+        model
+            .submit_frame(first_window, vec![1, 2, 3, 4], 1.0)
+            .unwrap();
+        assert_eq!(model.resource_usage().frame_bytes, 4);
+        assert_eq!(
+            model.submit_frame(second_window, vec![5, 6], 1.1),
+            Err(ModelError::Quota(QuotaKind::FrameBytes))
+        );
+        let ResourceState::Window(second) = &model.get(second_window).unwrap().state else {
+            panic!("window state expected")
+        };
+        assert!(second.frame.is_empty());
+
+        let replacement = model
+            .submit_frame(first_window, vec![7, 8, 9, 10, 11], 1.2)
+            .unwrap();
+        assert_eq!(replacement.sequence, 2);
+        assert_eq!(model.resource_usage().frame_bytes, 5);
+        assert_eq!(
+            model.submit_frame(first_window, vec![0; 6], 1.3),
+            Err(ModelError::Quota(QuotaKind::FrameBytes))
+        );
+        let ResourceState::Window(first) = &model.get(first_window).unwrap().state else {
+            panic!("window state expected")
+        };
+        assert_eq!(first.frame, vec![7, 8, 9, 10, 11]);
+        assert_eq!(first.frame_generation, 2);
+        assert_eq!(model.frame_metrics().submitted, 2);
+
+        model.close(first_window).unwrap();
+        assert_eq!(model.resource_usage().frame_bytes, 0);
+        model.submit_frame(second_window, vec![12; 5], 1.4).unwrap();
+        model.close(application).unwrap();
+        assert_eq!(model.resource_usage(), ResourceUsage::default());
     }
 
     #[test]
