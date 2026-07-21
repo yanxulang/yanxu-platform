@@ -166,34 +166,76 @@ jobs:
       - name: 检查六目标来源、许可与公告
         run: |
           cargo deny check advisories licenses sources
-          cargo audit --file Cargo.lock --deny warnings --ignore RUSTSEC-2026-0192
+          cargo audit --file Cargo.lock --deny warnings
 
-  assemble:
-    name: 汇总六目标正式包候选
-    needs: [native, dependency-policy]
+  performance-budget:
+    name: Release 性能预算
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: 安装 Linux 图形开发库
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev
+      - name: 执行长样本 Release 性能预算
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --release --locked --example performance_budget -- \
+            --report "$RUNNER_TEMP/yanxu-platform-performance-budget.json"
+          jq -e \
+            '.schema == 1 and .profile == "release" and .passed == true and
+             (.cases | length == 4) and all(.cases[]; .passed == true)' \
+            "$RUNNER_TEMP/yanxu-platform-performance-budget.json"
+      - name: 保存性能预算报告
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: yanxu-platform-performance-budget
+          path: ${{ runner.temp }}/yanxu-platform-performance-budget.json
+          if-no-files-found: error
+
+  assemble:
+    name: 汇总六目标正式包候选
+    needs: [native, dependency-policy, performance-budget]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: yanxu-platform-performance-budget
+          path: performance
       - name: 核对固定制品来源并创建确定性发布包
         shell: bash
         run: |
           set -euo pipefail
           sh scripts/verify-release-source.sh
-          grep -F '29803668169' docs/ARTIFACT_PROVENANCE.md
-          grep -F 'd68bb7297d357b967188362afd6b60f13b6e843f' docs/ARTIFACT_PROVENANCE.md
+          grep -F '29808592375' docs/ARTIFACT_PROVENANCE.md
+          grep -F '3d1dae4b4546762902e99d37b517f383c8a7a521' docs/ARTIFACT_PROVENANCE.md
+          jq -e \
+            '.schema == 1 and .package_version == "0.9.0" and
+             .profile == "release" and .os == "linux" and .arch == "x86_64" and
+             .passed == true and (.cases | length == 4) and
+             all(.cases[]; .passed == true)' \
+            performance/yanxu-platform-performance-budget.json
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
-            -czf yanxu-platform-0.8.0-six-targets.tar.gz \
+            -czf yanxu-platform-0.9.0-six-targets.tar.gz \
             .gitattributes .github .gitignore src native vendor api docs examples tests dist scripts \
             Cargo.toml Cargo.lock deny.toml 言序.toml 言序.toml.in \
             README.md CHANGELOG.md SECURITY.md LICENSE-MIT LICENSE-APACHE
-          sha256sum yanxu-platform-0.8.0-six-targets.tar.gz \
-            > yanxu-platform-0.8.0-six-targets.sha256
-          cp 言序.toml yanxu-platform-0.8.0.toml
+          sha256sum yanxu-platform-0.9.0-six-targets.tar.gz \
+            > yanxu-platform-0.9.0-six-targets.sha256
+          cp 言序.toml yanxu-platform-0.9.0.toml
+          cp performance/yanxu-platform-performance-budget.json \
+            yanxu-platform-0.9.0-performance.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: yanxu-platform-six-targets
           path: |
-            yanxu-platform-0.8.0-six-targets.tar.gz
-            yanxu-platform-0.8.0-six-targets.sha256
-            yanxu-platform-0.8.0.toml
+            yanxu-platform-0.9.0-six-targets.tar.gz
+            yanxu-platform-0.9.0-six-targets.sha256
+            yanxu-platform-0.9.0.toml
+            yanxu-platform-0.9.0-performance.json
           if-no-files-found: error

@@ -9,9 +9,6 @@ targets = [
 ]
 
 [advisories]
-ignore = [
-  { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25.1 is a safe-Rust transitive fontdb parser with no known vulnerability; migration is tracked and reviewed before every release" },
-]
 
 [licenses]
 confidence-threshold = 0.8
@@ -37,3 +34,6 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/RazrFalcon/fontdb"]
+required-git-spec = "rev"
+unused-allowed-source = "deny"
