@@ -11,6 +11,8 @@ description = "Yanxu ABI v2 native desktop platform primitives"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+accesskit = { version = "=0.24.1", default-features = false }
+accesskit_winit = { version = "=0.33.2", default-features = false, features = ["accesskit_unix", "async-io", "rwh_06"] }
 arboard = { version = "=3.6.1", default-features = false, features = ["image-data"] }
 cosmic-text = { version = "=0.19.0", default-features = true }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
