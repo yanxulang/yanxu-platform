@@ -4,8 +4,13 @@ use crate::backend::{HostApi, PlatformResource, monotonic_seconds};
 use crate::data::Data;
 use crate::event::{EventKind, PlatformEvent};
 use crate::model::{DisplayState, Model, ResourceKind, ResourceState, WindowState};
+use crate::native_accessibility::{NativeActivationHandler, NativeTreeSnapshot};
 use crate::render::{ImageData, RenderEngine};
 use crate::sync::RecoverMutex;
+use accesskit_winit::{
+    Adapter as AccessibilityAdapter, Event as AccessibilityEvent,
+    WindowEvent as AccessibilityWindowEvent,
+};
 use softbuffer::{Context, Surface};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroU32;
@@ -27,7 +32,18 @@ struct RunningGuard {
     model: Arc<Mutex<Model>>,
 }
 
-static PROXIES: std::sync::OnceLock<Mutex<HashMap<u64, EventLoopProxy<()>>>> =
+enum UserEvent {
+    Wake,
+    Accessibility(AccessibilityEvent),
+}
+
+impl From<AccessibilityEvent> for UserEvent {
+    fn from(event: AccessibilityEvent) -> Self {
+        Self::Accessibility(event)
+    }
+}
+
+static PROXIES: std::sync::OnceLock<Mutex<HashMap<u64, EventLoopProxy<UserEvent>>>> =
     std::sync::OnceLock::new();
 
 struct ProxyGuard {
@@ -47,7 +63,7 @@ pub fn wake(event_loop_id: u64) -> bool {
     PROXIES
         .get()
         .and_then(|proxies| proxies.lock_recover().get(&event_loop_id).cloned())
-        .is_some_and(|proxy| proxy.send_event(()).is_ok())
+        .is_some_and(|proxy| proxy.send_event(UserEvent::Wake).is_ok())
 }
 
 impl Drop for RunningGuard {
@@ -76,17 +92,27 @@ pub fn run(
     let _running = RunningGuard {
         model: model.clone(),
     };
-    let event_loop = EventLoop::new().map_err(|_| "PLATFORM_EVENT_LOOP")?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .map_err(|_| "PLATFORM_EVENT_LOOP")?;
+    let event_loop_proxy = event_loop.create_proxy();
     PROXIES
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock_recover()
-        .insert(host.0.event_loop_id, event_loop.create_proxy());
+        .insert(host.0.event_loop_id, event_loop_proxy.clone());
     let _proxy = ProxyGuard {
         event_loop_id: host.0.event_loop_id,
     };
     let context =
         Context::new(event_loop.owned_display_handle()).map_err(|_| "PLATFORM_SURFACE_CREATE")?;
-    let mut runner = Runner::new(model, host, callback, application_id, context);
+    let mut runner = Runner::new(
+        model,
+        host,
+        callback,
+        application_id,
+        context,
+        event_loop_proxy,
+    );
     event_loop
         .run_app(&mut runner)
         .map_err(|_| "PLATFORM_EVENT_LOOP")?;
@@ -96,7 +122,12 @@ pub fn run(
 struct NativeWindow {
     // 表面必须先于其持有的窗口释放。
     surface: Surface<OwnedDisplayHandle, Arc<Window>>,
+    // 适配器可能引用原生窗口，必须先于窗口释放。
+    accessibility_adapter: AccessibilityAdapter,
     window: Arc<Window>,
+    accessibility_snapshot: Arc<Mutex<NativeTreeSnapshot>>,
+    accessibility_physical_size: [u32; 2],
+    accessibility_scale_factor: f64,
     applied: WindowState,
     modifiers: ModifiersState,
     pointer_position: [f64; 2],
@@ -110,6 +141,7 @@ struct Runner {
     windows: BTreeMap<u64, NativeWindow>,
     window_ids: HashMap<WindowId, u64>,
     context: Context<OwnedDisplayHandle>,
+    event_loop_proxy: EventLoopProxy<UserEvent>,
     renderer: RenderEngine,
     loaded_fonts: BTreeSet<u64>,
     focused: HashSet<WindowId>,
@@ -124,6 +156,7 @@ impl Runner {
         callback: u64,
         application_id: u64,
         context: Context<OwnedDisplayHandle>,
+        event_loop_proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
         Self {
             model,
@@ -133,6 +166,7 @@ impl Runner {
             windows: BTreeMap::new(),
             window_ids: HashMap::new(),
             context,
+            event_loop_proxy,
             renderer: RenderEngine::new(),
             loaded_fonts: BTreeSet::new(),
             focused: HashSet::new(),
@@ -295,12 +329,12 @@ impl Runner {
         &mut self,
         event_loop: &ActiveEventLoop,
         model_id: u64,
-        state: WindowState,
+        mut state: WindowState,
     ) -> Result<NativeWindow, &'static str> {
         let mut attributes = Window::default_attributes()
             .with_title(state.title.clone())
             .with_inner_size(LogicalSize::new(state.width, state.height))
-            .with_visible(state.visible)
+            .with_visible(false)
             .with_transparent(state.transparent)
             .with_decorations(!state.borderless)
             .with_window_level(window_level(state.always_on_top))
@@ -328,21 +362,46 @@ impl Runner {
         let display = window
             .current_monitor()
             .map(|monitor| display_state(&monitor, primary.as_ref()));
+        state.width = f64::from(inner.width) / scale;
+        state.height = f64::from(inner.height) / scale;
+        state.scale_factor = scale;
+        state.display.clone_from(&display);
         {
             let mut model = self.model.lock_recover();
             if let Ok(node) = model.get_mut(model_id)
                 && let ResourceState::Window(window_state) = &mut node.state
             {
-                window_state.width = f64::from(inner.width) / scale;
-                window_state.height = f64::from(inner.height) / scale;
+                window_state.width = state.width;
+                window_state.height = state.height;
                 window_state.scale_factor = scale;
                 window_state.display = display;
             }
         }
+        let accessibility_physical_size = [inner.width, inner.height];
+        let accessibility_snapshot = Arc::new(Mutex::new(NativeTreeSnapshot::new(
+            &state.title,
+            accessibility_physical_size,
+            scale,
+            &state.accessibility,
+        )));
+        let accessibility_adapter = AccessibilityAdapter::with_mixed_handlers(
+            event_loop,
+            &window,
+            NativeActivationHandler::new(Arc::clone(&accessibility_snapshot)),
+            self.event_loop_proxy.clone(),
+        );
+        let applied = WindowState {
+            visible: false,
+            ..WindowState::default()
+        };
         let mut native = NativeWindow {
             surface,
+            accessibility_adapter,
             window,
-            applied: WindowState::default(),
+            accessibility_snapshot,
+            accessibility_physical_size,
+            accessibility_scale_factor: scale,
+            applied,
             modifiers: ModifiersState::default(),
             pointer_position: [0.0, 0.0],
         };
@@ -929,7 +988,7 @@ fn frame_presented_event(
     .with("延迟毫秒", latency_milliseconds)
 }
 
-impl ApplicationHandler for Runner {
+impl ApplicationHandler<UserEvent> for Runner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.refresh_environment(event_loop);
         self.sync_model(event_loop);
@@ -947,7 +1006,26 @@ impl ApplicationHandler for Runner {
         let Some(model_id) = self.window_ids.get(&window_id).copied() else {
             return;
         };
+        if let Some(native) = self.windows.get_mut(&model_id) {
+            native
+                .accessibility_adapter
+                .process_event(&native.window, &event);
+        }
         self.handle_window_event(event_loop, window_id, model_id, event);
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        let UserEvent::Accessibility(event) = event else {
+            return;
+        };
+        if !self.window_ids.contains_key(&event.window_id) {
+            return;
+        }
+        match event.window_event {
+            AccessibilityWindowEvent::InitialTreeRequested
+            | AccessibilityWindowEvent::ActionRequested(_)
+            | AccessibilityWindowEvent::AccessibilityDeactivated => {}
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -1037,8 +1115,34 @@ fn apply_window_state(native: &mut NativeWindow, state: &WindowState) -> bool {
     if redraw {
         window.request_redraw();
     }
+    sync_accessibility(native, state);
     native.applied.clone_from(state);
     redraw
+}
+
+fn sync_accessibility(native: &mut NativeWindow, state: &WindowState) {
+    let inner = native.window.inner_size();
+    let physical_size = [inner.width, inner.height];
+    let scale_factor = native.window.scale_factor();
+    if native.applied.title == state.title
+        && native.applied.accessibility == state.accessibility
+        && native.accessibility_physical_size == physical_size
+        && native.accessibility_scale_factor == scale_factor
+    {
+        return;
+    }
+    native.accessibility_physical_size = physical_size;
+    native.accessibility_scale_factor = scale_factor;
+    native.accessibility_snapshot.lock_recover().replace(
+        &state.title,
+        physical_size,
+        scale_factor,
+        &state.accessibility,
+    );
+    let snapshot = Arc::clone(&native.accessibility_snapshot);
+    native
+        .accessibility_adapter
+        .update_if_active(move || snapshot.lock_recover().full_update());
 }
 
 fn display_state(monitor: &MonitorHandle, primary: Option<&MonitorHandle>) -> DisplayState {

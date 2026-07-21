@@ -11,7 +11,6 @@ pub mod data;
 pub mod draw;
 pub mod event;
 pub mod model;
-#[cfg_attr(not(test), allow(dead_code))]
 mod native_accessibility;
 pub mod protocol;
 pub mod render;

@@ -2,11 +2,13 @@
 
 use crate::accessibility::{AccessibilityState, SemanticNode};
 use crate::data::Data;
+use crate::sync::RecoverMutex;
 use accesskit::{
-    Action, AriaCurrent, CustomAction, Invalid, Node, NodeId, Orientation, Rect, Role, Toggled,
-    Tree, TreeId, TreeUpdate,
+    Action, ActivationHandler, AriaCurrent, CustomAction, Invalid, Node, NodeId, Orientation, Rect,
+    Role, Toggled, Tree, TreeId, TreeUpdate,
 };
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 pub(crate) const WINDOW_ROOT_ID: NodeId = NodeId(0);
 
@@ -17,6 +19,70 @@ const CUSTOM_CUT: i32 = 4;
 const CUSTOM_PASTE: i32 = 5;
 const MAX_NATIVE_SCALE_FACTOR: f64 = 1_024.0;
 const MAX_EXACT_F64_INTEGER: i64 = 9_007_199_254_740_992;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NativeTreeSnapshot {
+    title: String,
+    physical_size: [u32; 2],
+    scale_factor: f64,
+    accessibility: AccessibilityState,
+}
+
+impl NativeTreeSnapshot {
+    pub(crate) fn new(
+        title: &str,
+        physical_size: [u32; 2],
+        scale_factor: f64,
+        accessibility: &AccessibilityState,
+    ) -> Self {
+        Self {
+            title: title.to_owned(),
+            physical_size,
+            scale_factor,
+            accessibility: accessibility.clone(),
+        }
+    }
+
+    pub(crate) fn replace(
+        &mut self,
+        title: &str,
+        physical_size: [u32; 2],
+        scale_factor: f64,
+        accessibility: &AccessibilityState,
+    ) {
+        self.title.clear();
+        self.title.push_str(title);
+        self.physical_size = physical_size;
+        self.scale_factor = scale_factor;
+        self.accessibility.clone_from(accessibility);
+    }
+
+    #[must_use]
+    pub(crate) fn full_update(&self) -> TreeUpdate {
+        full_tree_update(
+            &self.title,
+            self.physical_size,
+            self.scale_factor,
+            &self.accessibility,
+        )
+    }
+}
+
+pub(crate) struct NativeActivationHandler {
+    snapshot: Arc<Mutex<NativeTreeSnapshot>>,
+}
+
+impl NativeActivationHandler {
+    pub(crate) fn new(snapshot: Arc<Mutex<NativeTreeSnapshot>>) -> Self {
+        Self { snapshot }
+    }
+}
+
+impl ActivationHandler for NativeActivationHandler {
+    fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
+        Some(self.snapshot.lock_recover().full_update())
+    }
+}
 
 const ROLE_MAP: &[(&str, Role)] = &[
     ("窗口", Role::Window),
@@ -674,5 +740,50 @@ mod tests {
         assert_eq!(root.bounds(), Some(Rect::ZERO));
         assert_eq!(normalized_scale_factor(0.0), 1.0);
         assert_eq!(normalized_scale_factor(MAX_NATIVE_SCALE_FACTOR + 1.0), 1.0);
+    }
+
+    #[test]
+    fn activation_reads_the_latest_thread_safe_snapshot() {
+        let snapshot = Arc::new(Mutex::new(NativeTreeSnapshot::new(
+            "初始",
+            [10, 20],
+            1.0,
+            &AccessibilityState::default(),
+        )));
+        let first_snapshot = Arc::clone(&snapshot);
+        let first = std::thread::spawn(move || {
+            NativeActivationHandler::new(first_snapshot)
+                .request_initial_tree()
+                .unwrap()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(converted_node(&first, 0).label(), Some("初始"));
+        assert_eq!(
+            converted_node(&first, 0).bounds(),
+            Some(Rect::new(0.0, 0.0, 10.0, 20.0))
+        );
+
+        let state = state_with(semantic_node(
+            1,
+            "按钮",
+            Data::Nil,
+            BTreeMap::new(),
+            &["点击"],
+            [1.0, 2.0, 3.0, 4.0],
+            Vec::new(),
+        ));
+        snapshot
+            .lock_recover()
+            .replace("更新", [30, 40], 2.0, &state);
+        let second = NativeActivationHandler::new(snapshot)
+            .request_initial_tree()
+            .unwrap();
+        assert_eq!(converted_node(&second, 0).label(), Some("更新"));
+        assert_eq!(converted_node(&second, 0).children(), &[NodeId(1)]);
+        assert_eq!(
+            converted_node(&second, 1).bounds(),
+            Some(Rect::new(2.0, 4.0, 8.0, 12.0))
+        );
     }
 }
