@@ -11,14 +11,14 @@
 言序应用 → yanxu-ui（言界）→ yanxu-platform（言台）→ 原生平台后端 → 操作系统
 ```
 
-当前版本为 `0.8.0`，最低要求言序 `1.1.7`。原生后端采用 ABI v2，窗口层使用
+当前版本为 `0.9.0`，最低要求言序 `1.1.7`。原生后端采用 ABI v2，窗口层使用
 `winit`，CPU 表面使用 `softbuffer`，二维栅格化使用 `tiny-skia`，复杂文字使用
 `cosmic-text`。依赖版本、许可证与选型理由会固定在 `docs/` 中。
 
-0.8.0 在既有六目标原生窗口和无障碍桥之上增加应用级资源配额与可控关闭。应用可以在
-首次运行或创建子资源前下调数量和持有字节上限；之后永久冻结。窗口初始事件、字体加载
-和图片解码都在修改外部状态前完成配额/容量预检。应用状态明确区分就绪、运行、退出请求、
-已退出和关闭，调试快照公开拒绝、退出、回收与资源归零计数。
+0.9.0 在既有六目标原生窗口、无障碍桥、应用配额和可控关闭之上建立生产稳定性门禁：
+绘制协议与 ABI 值有版本化畸形语料，事件背压和完整资源生命周期有长序列浸泡证明，固定
+Linux x86-64 运行器使用 Release 长样本、中位数与 MAD 执行性能预算。供应链审计不再
+忽略停止维护的字体解析依赖，六目标候选必须同时等待零例外公告/许可/来源检查和性能报告。
 
 ## 安装依赖
 
@@ -76,7 +76,8 @@ cargo test --manifest-path yanxu-platform/Cargo.toml --workspace --all-targets -
 - [实际架构](docs/ARCHITECTURE.md)与[平台 API](docs/PLATFORM_API.md)
 - [事件协议](docs/EVENT_PROTOCOL.md)、[无障碍协议](docs/ACCESSIBILITY_PROTOCOL.md)、
   [绘制协议](docs/DRAW_PROTOCOL.md)和[文字/IME](docs/TEXT_AND_IME.md)
-- [资源生命周期](docs/RESOURCE_LIFETIME.md)、[线程模型](docs/THREADING_MODEL.md)与[兼容政策](docs/COMPATIBILITY.md)
+- [资源生命周期](docs/RESOURCE_LIFETIME.md)、[线程模型](docs/THREADING_MODEL.md)、
+  [Release 性能预算](docs/PERFORMANCE_BUDGET.md)与[兼容政策](docs/COMPATIBILITY.md)
 - [后端贡献](docs/BACKEND_GUIDE.md)、[打包发布](docs/PACKAGING.md)和[生成的 API 参考](docs/API.md)
 - [第三方许可与安全审计](docs/THIRD_PARTY.md)、[原生制品来源](docs/ARTIFACT_PROVENANCE.md)
 
