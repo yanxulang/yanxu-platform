@@ -97,12 +97,18 @@ jobs:
           "$core" 文 src/主.yx "$RUNNER_TEMP/API.md"
           cmp api/api-v1.json "$RUNNER_TEMP/api-v1.json"
           cmp docs/API.md "$RUNNER_TEMP/API.md"
-      - name: Linux 虚拟显示真实窗口自动退出冒烟
-        if: runner.os == 'Linux'
+      - name: 六目标真实窗口与原生无障碍桥自动退出冒烟
         shell: bash
         run: |
-          core="$GITHUB_WORKSPACE/yanxu-core/target/debug/yanxu"
-          xvfb-run -a "$core" 字节 examples/最小窗口.yx
+          set -euo pipefail
+          suffix=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then suffix=".exe"; fi
+          core="$GITHUB_WORKSPACE/yanxu-core/target/debug/yanxu$suffix"
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            xvfb-run -a "$core" 字节 examples/最小窗口.yx
+          else
+            "$core" 字节 examples/最小窗口.yx
+          fi
       - name: 核对 ABI v2 导出与制品摘要
         shell: bash
         env:
