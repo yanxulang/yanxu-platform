@@ -1,7 +1,8 @@
 # 平台后端贡献指南
 
-0.6.0 的 Windows、macOS、Wayland 与 X11 支持共享 `winit`/`softbuffer` 后端。新增系统集成
-应先扩展这条路径；只有上游无法表达所需原语时才增加小型 `cfg(target_os)` 适配器。
+0.7.0 的 Windows、macOS、Wayland 与 X11 支持共享 `winit`/`softbuffer` 后端，UIA、
+NSAccessibility 与 AT-SPI 共享 AccessKit 语义层。新增系统集成应先扩展这两条统一路径；
+只有上游无法表达所需原语时才增加小型 `cfg(target_os)` 适配器。
 
 ## 边界
 
@@ -10,7 +11,8 @@
 
 系统事件必须先转换成 [EVENT_PROTOCOL.md](EVENT_PROTOCOL.md) 定义的逻辑像素事件；绘制
 必须消费 [DRAW_PROTOCOL.md](DRAW_PROTOCOL.md) 的完整帧。不得为单次指针移动或单条绘制
-命令增加 ABI 往返。
+命令增加 ABI 往返。无障碍后端必须消费 [ACCESSIBILITY_PROTOCOL.md](ACCESSIBILITY_PROTOCOL.md)
+的已验证树，并把系统动作送回同一模型校验，不得直接改写上层状态。
 
 ## 增加能力的步骤
 
@@ -18,7 +20,8 @@
 2. 在 `event.rs` 或 `protocol.rs` 中先定义版本与兼容规则。
 3. 在 `backend.rs` 添加参数校验、权限检查和稳定错误代码。
 4. 若需要言序入口，在 `src/主.yx` 添加最小包装，并重新生成 API 文档。
-5. 在 `windowing.rs` 把状态映射到 winit，把系统事件映射回统一事件。
+5. 在 `windowing.rs` 把状态映射到 winit，把系统事件映射回统一事件；无障碍语义转换放在
+   `native_accessibility.rs`，不在三个平台各自复制角色规则。
 6. 为纯转换、损坏输入、生命周期和错误路径写不需要显示器的单元测试。
 7. 为真实窗口路径增加可自动退出的集成示例。
 8. 更新能力查询、协议文档、第三方清单和六目标 CI。
@@ -36,6 +39,10 @@ ABI 描述符在 `lib.rs` 中集中列出函数和资源类型。新增操作附
 - 新依赖固定精确版本，关闭不需要的默认特性，并通过许可与公告检查。
 - 系统 API 必需的 `unsafe` 局限在小函数内，写明调用前置条件；工作区拒绝
   `unsafe_op_in_unsafe_fn`。
+- 原生无障碍适配器必须在窗口首次显示前创建；激活回调可能来自平台线程，只能读取
+  线程安全快照。动作、停用和唤醒事件统一通过事件循环代理返回 GUI 线程。
+- 协议节点编号不得与保留的窗口根和合成文字运行编号冲突；密码值或文字运行不得进入
+  原生树、日志或诊断。
 
 ## 事件
 
@@ -66,9 +73,9 @@ yanxu-language-new/target/debug/yanxu 包 更新 yanxu-platform/tests
 yanxu-language-new/target/debug/yanxu 字节 yanxu-platform/tests/平台包装.yx
 ```
 
-还需运行固定版本的 `cargo deny` 与 `cargo audit`。真实窗口示例在当前桌面执行；Linux CI
-使用 `xvfb-run`。API 漂移门禁用言序 1.1.7 重新生成 `api/api-v1.json` 和 `docs/API.md`
-并逐字节比较。
+还需运行固定版本的 `cargo deny` 与 `cargo audit`。六个正式目标都执行提交语义树的真实
+窗口示例，Linux CI 使用 `xvfb-run`。API 漂移门禁用言序 1.1.7 重新生成
+`api/api-v1.json` 和 `docs/API.md`并逐字节比较。
 
 ## 发布后端制品
 
