@@ -3100,6 +3100,7 @@ dependencies = [
  "rfd",
  "softbuffer",
  "tiny-skia",
+ "unicode-segmentation",
  "winit",
 ]
 

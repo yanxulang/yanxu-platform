@@ -19,6 +19,7 @@ image = { version = "=0.25.10", default-features = false, features = ["jpeg", "p
 rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal", "wayland"] }
 softbuffer = { version = "=0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
+unicode-segmentation = "=1.13.3"
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
