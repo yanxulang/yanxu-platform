@@ -28,7 +28,7 @@ const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
 const PLATFORM_MAJOR: i64 = 1;
-const PLATFORM_MINOR: i64 = 5;
+const PLATFORM_MINOR: i64 = 6;
 const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPBOARD_IMAGE_DIMENSION: usize = 16_384;
 const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -1027,7 +1027,15 @@ fn capabilities() -> Data {
         ("无障碍语义树", Data::Bool(true)),
         ("无障碍焦点请求", Data::Bool(true)),
         ("无障碍动作请求", Data::Bool(true)),
-        ("原生无障碍桥", Data::Bool(false)),
+        (
+            "原生无障碍桥",
+            Data::Bool(native_accessibility_backend().is_some()),
+        ),
+        (
+            "原生无障碍后端",
+            native_accessibility_backend()
+                .map_or(Data::Nil, |backend| Data::String(backend.to_owned())),
+        ),
         ("无障碍节点上限", usize_data(MAX_SEMANTIC_NODES)),
         ("无障碍深度上限", usize_data(MAX_SEMANTIC_DEPTH)),
         ("无障碍单节点子上限", usize_data(MAX_SEMANTIC_CHILDREN)),
@@ -1290,9 +1298,40 @@ fn debug_snapshot(model: &Model) -> Data {
                 ("焦点请求总数", u64_data(accessibility.focus_requests)),
                 ("动作请求总数", u64_data(accessibility.action_requests)),
                 ("拒绝总数", u64_data(accessibility.rejected)),
+                (
+                    "原生桥当前激活",
+                    usize_data(accessibility.native_bridges_active),
+                ),
+                (
+                    "原生桥激活高水位",
+                    usize_data(accessibility.native_bridges_high_watermark),
+                ),
+                (
+                    "原生桥激活总数",
+                    u64_data(accessibility.native_bridge_activations),
+                ),
+                (
+                    "原生桥停用总数",
+                    u64_data(accessibility.native_bridge_deactivations),
+                ),
+                ("原生树同步总数", u64_data(accessibility.native_tree_syncs)),
+                ("原生请求总数", u64_data(accessibility.native_requests)),
+                ("原生拒绝总数", u64_data(accessibility.native_rejected)),
             ]),
         ),
     ])
+}
+
+const fn native_accessibility_backend() -> Option<&'static str> {
+    if cfg!(target_os = "windows") {
+        Some("UIA")
+    } else if cfg!(target_os = "macos") {
+        Some("NSAccessibility")
+    } else if cfg!(target_os = "linux") {
+        Some("AT-SPI")
+    } else {
+        None
+    }
 }
 
 fn usize_data(value: usize) -> Data {
@@ -1903,7 +1942,12 @@ mod tests {
         );
         assert_eq!(
             capabilities().as_map().unwrap()["原生无障碍桥"],
-            Data::Bool(false)
+            Data::Bool(native_accessibility_backend().is_some())
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["原生无障碍后端"],
+            native_accessibility_backend()
+                .map_or(Data::Nil, |backend| Data::String(backend.to_owned()))
         );
         assert_eq!(
             capabilities().as_map().unwrap()["无障碍节点上限"],
@@ -2013,6 +2057,11 @@ mod tests {
         assert_eq!(frames["提交总数"], Data::Integer(2));
         assert_eq!(frames["替换总数"], Data::Integer(1));
         assert_eq!(frames["字节高水位"], Data::Integer(3));
+        let accessibility = snapshot["无障碍统计"].as_map().unwrap();
+        assert_eq!(accessibility["原生桥当前激活"], Data::Integer(0));
+        assert_eq!(accessibility["原生树同步总数"], Data::Integer(0));
+        assert_eq!(accessibility["原生请求总数"], Data::Integer(0));
+        assert_eq!(accessibility["原生拒绝总数"], Data::Integer(0));
     }
 
     #[test]

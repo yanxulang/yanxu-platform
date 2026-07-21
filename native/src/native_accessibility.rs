@@ -1,0 +1,1383 @@
+//! 将言台无句柄语义树确定性转换为 AccessKit 原生树。
+
+use crate::accessibility::{AccessibilityState, SemanticNode};
+use crate::data::Data;
+use crate::model::Model;
+use crate::sync::RecoverMutex;
+use accesskit::{
+    Action, ActionData, ActionRequest, ActivationHandler, AriaCurrent, CustomAction, Invalid, Node,
+    NodeId, Orientation, Rect, Role, ScrollUnit, Toggled, Tree, TreeId, TreeUpdate,
+};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use unicode_segmentation::UnicodeSegmentation;
+
+pub(crate) const WINDOW_ROOT_ID: NodeId = NodeId(0);
+const TEXT_RUN_ID_MASK: u64 = 1 << 63;
+
+const CUSTOM_SELECT: i32 = 1;
+const CUSTOM_DESELECT: i32 = 2;
+const CUSTOM_COPY: i32 = 3;
+const CUSTOM_CUT: i32 = 4;
+const CUSTOM_PASTE: i32 = 5;
+const MAX_NATIVE_SCALE_FACTOR: f64 = 1_024.0;
+const MAX_EXACT_F64_INTEGER: i64 = 9_007_199_254_740_992;
+const MIN_I64_AS_F64: f64 = -9_223_372_036_854_775_808.0;
+const MAX_I64_AS_F64_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum NativeRequest {
+    Focus {
+        node_id: i64,
+    },
+    Action {
+        node_id: i64,
+        action: &'static str,
+        argument: Data,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeRequestError {
+    Tree,
+    Target,
+    Action,
+    Data,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NativeTreeSnapshot {
+    title: String,
+    physical_size: [u32; 2],
+    scale_factor: f64,
+    accessibility: AccessibilityState,
+}
+
+impl NativeTreeSnapshot {
+    pub(crate) fn new(
+        title: &str,
+        physical_size: [u32; 2],
+        scale_factor: f64,
+        accessibility: &AccessibilityState,
+    ) -> Self {
+        Self {
+            title: title.to_owned(),
+            physical_size,
+            scale_factor,
+            accessibility: accessibility.clone(),
+        }
+    }
+
+    pub(crate) fn replace(
+        &mut self,
+        title: &str,
+        physical_size: [u32; 2],
+        scale_factor: f64,
+        accessibility: &AccessibilityState,
+    ) {
+        self.title.clear();
+        self.title.push_str(title);
+        self.physical_size = physical_size;
+        self.scale_factor = scale_factor;
+        self.accessibility.clone_from(accessibility);
+    }
+
+    #[must_use]
+    pub(crate) fn full_update(&self) -> TreeUpdate {
+        full_tree_update(
+            &self.title,
+            self.physical_size,
+            self.scale_factor,
+            &self.accessibility,
+        )
+    }
+}
+
+pub(crate) struct NativeActivationHandler {
+    snapshot: Arc<Mutex<NativeTreeSnapshot>>,
+    model: Arc<Mutex<Model>>,
+    window_id: u64,
+}
+
+impl NativeActivationHandler {
+    pub(crate) fn new(
+        snapshot: Arc<Mutex<NativeTreeSnapshot>>,
+        model: Arc<Mutex<Model>>,
+        window_id: u64,
+    ) -> Self {
+        Self {
+            snapshot,
+            model,
+            window_id,
+        }
+    }
+}
+
+impl ActivationHandler for NativeActivationHandler {
+    fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
+        self.model
+            .lock_recover()
+            .record_accessibility_bridge_activation(self.window_id);
+        Some(self.snapshot.lock_recover().full_update())
+    }
+}
+
+const ROLE_MAP: &[(&str, Role)] = &[
+    ("窗口", Role::Window),
+    ("组", Role::Group),
+    ("面板", Role::Pane),
+    ("控件", Role::Unknown),
+    ("文字", Role::Label),
+    ("标题", Role::Heading),
+    ("按钮", Role::Button),
+    ("链接", Role::Link),
+    ("复选框", Role::CheckBox),
+    ("单选框", Role::RadioButton),
+    ("切换", Role::Switch),
+    ("输入框", Role::TextInput),
+    ("多行输入框", Role::MultilineTextInput),
+    ("密码框", Role::PasswordInput),
+    ("组合框", Role::ComboBox),
+    ("列表", Role::List),
+    ("列表项", Role::ListItem),
+    ("树", Role::Tree),
+    ("树项", Role::TreeItem),
+    ("标签页", Role::TabList),
+    ("标签", Role::Tab),
+    ("菜单栏", Role::MenuBar),
+    ("菜单", Role::Menu),
+    ("菜单项", Role::MenuItem),
+    ("弹出层", Role::Group),
+    ("对话框", Role::Dialog),
+    ("滑块", Role::Slider),
+    ("进度条", Role::ProgressIndicator),
+    ("滚动条", Role::ScrollBar),
+    ("滚动容器", Role::ScrollView),
+    ("分割面板", Role::Splitter),
+    ("工具栏", Role::Toolbar),
+    ("画布", Role::Canvas),
+    ("图片", Role::Image),
+    ("表格", Role::Table),
+    ("行", Role::Row),
+    ("单元格", Role::Cell),
+    ("分隔符", Role::Splitter),
+];
+
+/// 构造包含稳定窗口根节点的完整原生树更新。
+pub(crate) fn full_tree_update(
+    title: &str,
+    physical_size: [u32; 2],
+    scale_factor: f64,
+    accessibility: &AccessibilityState,
+) -> TreeUpdate {
+    let scale_factor = normalized_scale_factor(scale_factor);
+    let mut window = Node::new(Role::Window);
+    if !title.is_empty() {
+        window.set_label(title);
+    }
+    window.set_bounds(Rect {
+        x0: 0.0,
+        y0: 0.0,
+        x1: f64::from(physical_size[0]),
+        y1: f64::from(physical_size[1]),
+    });
+
+    let mut nodes = Vec::with_capacity(
+        accessibility
+            .node_count()
+            .saturating_mul(2)
+            .saturating_add(1),
+    );
+    if let Some(tree) = accessibility.tree() {
+        window.push_child(node_id(tree.root().id()));
+    }
+    nodes.push((WINDOW_ROOT_ID, window));
+    if let Some(tree) = accessibility.tree() {
+        append_node(&mut nodes, tree.root(), scale_factor);
+    }
+
+    let mut tree = Tree::new(WINDOW_ROOT_ID);
+    tree.toolkit_name = Some("言台".to_owned());
+    tree.toolkit_version = Some(env!("CARGO_PKG_VERSION").to_owned());
+    TreeUpdate {
+        nodes,
+        tree: Some(tree),
+        tree_id: TreeId::ROOT,
+        focus: accessibility.focused().map_or(WINDOW_ROOT_ID, node_id),
+    }
+}
+
+pub(crate) fn translate_action_request(
+    accessibility: &AccessibilityState,
+    request: &ActionRequest,
+) -> Result<NativeRequest, NativeRequestError> {
+    if request.target_tree != TreeId::ROOT {
+        return Err(NativeRequestError::Tree);
+    }
+    let node_id = semantic_node_id(request.target_node).ok_or(NativeRequestError::Target)?;
+    let tree = accessibility.tree().ok_or(NativeRequestError::Tree)?;
+    let semantic = tree
+        .root()
+        .find(node_id)
+        .ok_or(NativeRequestError::Target)?;
+
+    let (action, argument) = match request.action {
+        Action::Focus if request.data.is_none() => {
+            return Ok(NativeRequest::Focus { node_id });
+        }
+        Action::Click if request.data.is_none() => {
+            let action = if semantic.actions().iter().any(|action| action == "点击") {
+                "点击"
+            } else if semantic.actions().iter().any(|action| action == "选择") {
+                "选择"
+            } else {
+                return Err(NativeRequestError::Action);
+            };
+            (action, Data::Nil)
+        }
+        Action::SetValue => (
+            "设置值",
+            set_value_argument(semantic, request.data.as_ref())?,
+        ),
+        Action::SetTextSelection => (
+            "选择",
+            text_selection_argument(semantic, request.data.as_ref())?,
+        ),
+        Action::CustomAction => custom_action_request(request.data.as_ref())?,
+        Action::Expand if request.data.is_none() => ("展开", Data::Nil),
+        Action::Collapse if request.data.is_none() => ("折叠", Data::Nil),
+        Action::Increment if request.data.is_none() => ("增加", Data::Nil),
+        Action::Decrement if request.data.is_none() => ("减少", Data::Nil),
+        Action::ScrollUp | Action::ScrollDown | Action::ScrollLeft | Action::ScrollRight => (
+            "滚动",
+            scroll_argument(semantic, request.action, request.data.as_ref())?,
+        ),
+        Action::ScrollIntoView
+            if matches!(
+                request.data.as_ref(),
+                None | Some(ActionData::ScrollHint(_))
+            ) =>
+        {
+            ("滚动到", Data::Nil)
+        }
+        Action::ShowContextMenu if request.data.is_none() => ("显示菜单", Data::Nil),
+        Action::Blur
+        | Action::HideTooltip
+        | Action::ShowTooltip
+        | Action::ReplaceSelectedText
+        | Action::ScrollToPoint
+        | Action::SetScrollOffset
+        | Action::SetSequentialFocusNavigationStartingPoint => {
+            return Err(NativeRequestError::Action);
+        }
+        Action::Focus
+        | Action::Click
+        | Action::Expand
+        | Action::Collapse
+        | Action::Increment
+        | Action::Decrement
+        | Action::ScrollIntoView
+        | Action::ShowContextMenu => return Err(NativeRequestError::Data),
+    };
+    Ok(NativeRequest::Action {
+        node_id,
+        action,
+        argument,
+    })
+}
+
+fn semantic_node_id(id: NodeId) -> Option<i64> {
+    if id == WINDOW_ROOT_ID || id.0 & TEXT_RUN_ID_MASK != 0 {
+        return None;
+    }
+    i64::try_from(id.0).ok().filter(|id| *id > 0)
+}
+
+fn set_value_argument(
+    semantic: &SemanticNode,
+    data: Option<&ActionData>,
+) -> Result<Data, NativeRequestError> {
+    match data {
+        Some(ActionData::Value(value)) => Ok(Data::String(value.to_string())),
+        Some(ActionData::NumericValue(value))
+            if semantic.role() == "组合框"
+                && value.is_finite()
+                && value.fract() == 0.0
+                && *value >= MIN_I64_AS_F64
+                && *value < MAX_I64_AS_F64_EXCLUSIVE =>
+        {
+            Ok(Data::Integer(*value as i64))
+        }
+        Some(ActionData::NumericValue(value)) if value.is_finite() => Ok(Data::Number(*value)),
+        _ => Err(NativeRequestError::Data),
+    }
+}
+
+fn text_selection_argument(
+    semantic: &SemanticNode,
+    data: Option<&ActionData>,
+) -> Result<Data, NativeRequestError> {
+    let Some(ActionData::SetTextSelection(selection)) = data else {
+        return Err(NativeRequestError::Data);
+    };
+    if !matches!(semantic.role(), "输入框" | "多行输入框") {
+        return Err(NativeRequestError::Action);
+    }
+    let value = match semantic.value() {
+        Data::String(value) => value.as_str(),
+        Data::Nil => "",
+        _ => return Err(NativeRequestError::Data),
+    };
+    let run_id = text_run_id(semantic.id());
+    let anchor = text_position_byte_offset(value, run_id, selection.anchor)?;
+    let focus = text_position_byte_offset(value, run_id, selection.focus)?;
+    let start = anchor.min(focus);
+    let end = anchor.max(focus);
+    Ok(Data::map([
+        (
+            "起",
+            Data::Integer(i64::try_from(start).map_err(|_| NativeRequestError::Data)?),
+        ),
+        (
+            "终",
+            Data::Integer(i64::try_from(end).map_err(|_| NativeRequestError::Data)?),
+        ),
+    ]))
+}
+
+fn text_position_byte_offset(
+    value: &str,
+    run_id: NodeId,
+    position: accesskit::TextPosition,
+) -> Result<usize, NativeRequestError> {
+    if position.node != run_id {
+        return Err(NativeRequestError::Target);
+    }
+    let lengths = grapheme_byte_lengths(value);
+    if position.character_index > lengths.len() {
+        return Err(NativeRequestError::Data);
+    }
+    Ok(lengths[..position.character_index]
+        .iter()
+        .map(|length| usize::from(*length))
+        .sum())
+}
+
+fn custom_action_request(
+    data: Option<&ActionData>,
+) -> Result<(&'static str, Data), NativeRequestError> {
+    let Some(ActionData::CustomAction(id)) = data else {
+        return Err(NativeRequestError::Data);
+    };
+    let action = match *id {
+        CUSTOM_SELECT => "选择",
+        CUSTOM_DESELECT => "取消选择",
+        CUSTOM_COPY => "复制",
+        CUSTOM_CUT => "剪切",
+        CUSTOM_PASTE => "粘贴",
+        _ => return Err(NativeRequestError::Action),
+    };
+    Ok((action, Data::Nil))
+}
+
+fn scroll_argument(
+    semantic: &SemanticNode,
+    action: Action,
+    data: Option<&ActionData>,
+) -> Result<Data, NativeRequestError> {
+    let unit = match data {
+        None => ScrollUnit::Item,
+        Some(ActionData::ScrollUnit(unit)) => *unit,
+        Some(_) => return Err(NativeRequestError::Data),
+    };
+    let [_, _, width, height] = semantic.bounds();
+    let (axis, direction, page_extent) = match action {
+        Action::ScrollUp => ("纵向", -1.0, height),
+        Action::ScrollDown => ("纵向", 1.0, height),
+        Action::ScrollLeft => ("横向", -1.0, width),
+        Action::ScrollRight => ("横向", 1.0, width),
+        _ => return Err(NativeRequestError::Action),
+    };
+    let magnitude = match unit {
+        ScrollUnit::Item => 1.0,
+        ScrollUnit::Page => page_extent.max(1.0),
+    };
+    Ok(Data::map([(axis, Data::Number(direction * magnitude))]))
+}
+
+fn normalized_scale_factor(scale_factor: f64) -> f64 {
+    if scale_factor.is_finite() && scale_factor > 0.0 && scale_factor <= MAX_NATIVE_SCALE_FACTOR {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
+fn append_node(nodes: &mut Vec<(NodeId, Node)>, semantic: &SemanticNode, scale_factor: f64) {
+    let mut native = Node::new(native_role(semantic.role()));
+    if !semantic.name().is_empty() {
+        if semantic.role() == "文字" && matches!(semantic.value(), Data::Nil) {
+            native.set_value(semantic.name());
+        } else {
+            native.set_label(semantic.name());
+        }
+    }
+    if !semantic.description().is_empty() {
+        native.set_description(semantic.description());
+    }
+    apply_value(&mut native, semantic.value());
+    apply_states(&mut native, semantic.states());
+    apply_actions(
+        &mut native,
+        semantic.role(),
+        semantic.actions(),
+        semantic.states(),
+    );
+
+    let bounds = native_bounds(semantic.bounds(), scale_factor);
+    native.set_bounds(bounds);
+    let text_run = native_text_run(semantic, bounds);
+    let mut children = Vec::with_capacity(
+        semantic
+            .children()
+            .len()
+            .saturating_add(usize::from(text_run.is_some())),
+    );
+    if let Some((text_run_id, _)) = &text_run {
+        children.push(*text_run_id);
+    }
+    children.extend(semantic.children().iter().map(|child| node_id(child.id())));
+    native.set_children(children);
+    nodes.push((node_id(semantic.id()), native));
+    if let Some(text_run) = text_run {
+        nodes.push(text_run);
+    }
+    for child in semantic.children() {
+        append_node(nodes, child, scale_factor);
+    }
+}
+
+fn native_bounds([x, y, width, height]: [f64; 4], scale_factor: f64) -> Rect {
+    Rect {
+        x0: x * scale_factor,
+        y0: y * scale_factor,
+        x1: (x + width) * scale_factor,
+        y1: (y + height) * scale_factor,
+    }
+}
+
+fn native_text_run(semantic: &SemanticNode, bounds: Rect) -> Option<(NodeId, Node)> {
+    if !matches!(semantic.role(), "输入框" | "多行输入框") {
+        return None;
+    }
+    let value = match semantic.value() {
+        Data::String(value) => value.as_str(),
+        Data::Nil => "",
+        _ => return None,
+    };
+    let mut text = Node::new(Role::TextRun);
+    text.set_value(value);
+    text.set_character_lengths(grapheme_byte_lengths(value));
+    text.set_bounds(bounds);
+    Some((text_run_id(semantic.id()), text))
+}
+
+fn text_run_id(id: i64) -> NodeId {
+    NodeId(node_id(id).0 | TEXT_RUN_ID_MASK)
+}
+
+fn grapheme_byte_lengths(value: &str) -> Vec<u8> {
+    let mut lengths = Vec::new();
+    for grapheme in value.graphemes(true) {
+        if let Ok(length) = u8::try_from(grapheme.len()) {
+            lengths.push(length);
+        } else {
+            lengths.extend(
+                grapheme
+                    .chars()
+                    .map(char::len_utf8)
+                    .map(|length| u8::try_from(length).expect("UTF-8 scalar length fits in u8")),
+            );
+        }
+    }
+    lengths
+}
+
+fn native_role(role: &str) -> Role {
+    ROLE_MAP
+        .iter()
+        .find_map(|(name, native)| (*name == role).then_some(*native))
+        .unwrap_or(Role::Unknown)
+}
+
+fn node_id(id: i64) -> NodeId {
+    NodeId(u64::try_from(id).expect("validated semantic node IDs are positive"))
+}
+
+fn apply_value(node: &mut Node, value: &Data) {
+    match value {
+        Data::Nil => {}
+        Data::Bool(value) => node.set_value(if *value { "true" } else { "false" }),
+        Data::Integer(value) => {
+            node.set_value(value.to_string());
+            if (-MAX_EXACT_F64_INTEGER..=MAX_EXACT_F64_INTEGER).contains(value) {
+                node.set_numeric_value(*value as f64);
+            }
+        }
+        Data::Number(value) => {
+            node.set_value(value.to_string());
+            node.set_numeric_value(*value);
+        }
+        Data::String(value) => node.set_value(value.as_str()),
+        Data::Bytes(_) | Data::Array(_) | Data::Map(_) | Data::Resource(_) | Data::Callback(_) => {
+            debug_assert!(false, "semantic values are validated as scalars");
+        }
+    }
+}
+
+fn apply_states(node: &mut Node, states: &BTreeMap<String, Data>) {
+    if state_bool(states, "启用") == Some(false) {
+        node.set_disabled();
+    }
+    if state_bool(states, "可见") == Some(false) {
+        node.set_hidden();
+    }
+    if state_bool(states, "忙碌") == Some(true) {
+        node.set_busy();
+    }
+    if state_bool(states, "只读") == Some(true) {
+        node.set_read_only();
+    }
+    if state_bool(states, "必填") == Some(true) {
+        node.set_required();
+    }
+    if state_bool(states, "无效") == Some(true) {
+        node.set_invalid(Invalid::True);
+    }
+    if let Some(selected) = state_bool(states, "选中") {
+        node.set_selected(selected);
+    }
+    if let Some(current) = state_bool(states, "当前") {
+        node.set_aria_current(if current {
+            AriaCurrent::True
+        } else {
+            AriaCurrent::False
+        });
+    }
+    if let Some(expanded) = state_bool(states, "展开") {
+        node.set_expanded(expanded);
+    }
+    if state_bool(states, "多选") == Some(true) {
+        node.set_multiselectable();
+    }
+    if state_bool(states, "模态") == Some(true) {
+        node.set_modal();
+    }
+
+    let toggled = if state_bool(states, "混合") == Some(true) {
+        Some(Toggled::Mixed)
+    } else if let Some(checked) = state_bool(states, "已检查") {
+        Some(checked.into())
+    } else {
+        state_bool(states, "按下").map(Into::into)
+    };
+    if let Some(toggled) = toggled {
+        node.set_toggled(toggled);
+    }
+
+    if let Some(Data::String(orientation)) = states.get("方向") {
+        node.set_orientation(match orientation.as_str() {
+            "横向" => Orientation::Horizontal,
+            "纵向" => Orientation::Vertical,
+            _ => return,
+        });
+    }
+    if let Some(Data::Integer(level)) = states.get("级别")
+        && let Ok(level) = usize::try_from(*level)
+    {
+        node.set_level(level);
+    }
+}
+
+fn apply_actions(node: &mut Node, role: &str, actions: &[String], states: &BTreeMap<String, Data>) {
+    for action in actions {
+        match action.as_str() {
+            "聚焦" => node.add_action(Action::Focus),
+            "点击" => node.add_action(Action::Click),
+            "设置值" => node.add_action(Action::SetValue),
+            "选择" if matches!(role, "输入框" | "多行输入框") => {
+                node.add_action(Action::SetTextSelection);
+            }
+            "选择" if role == "密码框" => {}
+            "选择" if actions.iter().any(|action| action == "点击") => {
+                add_custom_action(node, CUSTOM_SELECT, "选择");
+            }
+            "选择" => node.add_action(Action::Click),
+            "取消选择" => add_custom_action(node, CUSTOM_DESELECT, "取消选择"),
+            "复制" => add_custom_action(node, CUSTOM_COPY, "复制"),
+            "剪切" => add_custom_action(node, CUSTOM_CUT, "剪切"),
+            "粘贴" => add_custom_action(node, CUSTOM_PASTE, "粘贴"),
+            "展开" => node.add_action(Action::Expand),
+            "折叠" => node.add_action(Action::Collapse),
+            "增加" => node.add_action(Action::Increment),
+            "减少" => node.add_action(Action::Decrement),
+            "滚动" => add_scroll_actions(node, states),
+            "滚动到" => node.add_action(Action::ScrollIntoView),
+            "显示菜单" => node.add_action(Action::ShowContextMenu),
+            _ => debug_assert!(false, "semantic actions are validated before conversion"),
+        }
+    }
+}
+
+fn add_custom_action(node: &mut Node, id: i32, description: &str) {
+    node.add_action(Action::CustomAction);
+    node.push_custom_action(CustomAction {
+        id,
+        description: description.into(),
+    });
+}
+
+fn add_scroll_actions(node: &mut Node, states: &BTreeMap<String, Data>) {
+    match states.get("方向") {
+        Some(Data::String(value)) if value == "横向" => {
+            node.add_action(Action::ScrollLeft);
+            node.add_action(Action::ScrollRight);
+        }
+        Some(Data::String(value)) if value == "纵向" => {
+            node.add_action(Action::ScrollUp);
+            node.add_action(Action::ScrollDown);
+        }
+        _ => {
+            node.add_action(Action::ScrollLeft);
+            node.add_action(Action::ScrollRight);
+            node.add_action(Action::ScrollUp);
+            node.add_action(Action::ScrollDown);
+        }
+    }
+}
+
+fn state_bool(states: &BTreeMap<String, Data>, name: &str) -> Option<bool> {
+    match states.get(name) {
+        Some(Data::Bool(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::accessibility::{SEMANTIC_ACTIONS, SEMANTIC_ROLES, SemanticTree};
+    use crate::model::ResourceState;
+    use accesskit::{ScrollHint, TextPosition, TextSelection};
+
+    fn semantic_node(
+        id: i64,
+        role: &str,
+        value: Data,
+        states: BTreeMap<String, Data>,
+        actions: &[&str],
+        bounds: [f64; 4],
+        children: Vec<Data>,
+    ) -> Data {
+        Data::map([
+            ("编号", Data::Integer(id)),
+            ("角色", Data::String(role.to_owned())),
+            ("名称", Data::String(format!("节点{id}"))),
+            ("描述", Data::String(format!("说明{id}"))),
+            ("值", value),
+            ("状态", Data::Map(states)),
+            (
+                "操作",
+                Data::Array(
+                    actions
+                        .iter()
+                        .map(|action| Data::String((*action).to_owned()))
+                        .collect(),
+                ),
+            ),
+            (
+                "边界",
+                Data::Array(bounds.into_iter().map(Data::Number).collect()),
+            ),
+            ("子", Data::Array(children)),
+        ])
+    }
+
+    fn state_with(tree: Data) -> AccessibilityState {
+        let mut state = AccessibilityState::default();
+        state
+            .replace(Some(SemanticTree::validate(&tree).unwrap()))
+            .unwrap();
+        state
+    }
+
+    fn converted_node(update: &TreeUpdate, id: u64) -> &Node {
+        &update
+            .nodes
+            .iter()
+            .find(|(node_id, _)| *node_id == NodeId(id))
+            .unwrap()
+            .1
+    }
+
+    fn action_request(action: Action, target: i64, data: Option<ActionData>) -> ActionRequest {
+        ActionRequest {
+            action,
+            target_tree: TreeId::ROOT,
+            target_node: node_id(target),
+            data,
+        }
+    }
+
+    #[test]
+    fn maps_every_protocol_role_without_dropping_nodes() {
+        assert_eq!(ROLE_MAP.len(), SEMANTIC_ROLES.len());
+        assert_eq!(
+            ROLE_MAP.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            SEMANTIC_ROLES
+        );
+        for (index, (role, expected)) in ROLE_MAP.iter().enumerate() {
+            let id = i64::try_from(index).unwrap() + 1;
+            let state = state_with(semantic_node(
+                id,
+                role,
+                Data::Nil,
+                BTreeMap::new(),
+                &[],
+                [0.0, 0.0, 1.0, 1.0],
+                Vec::new(),
+            ));
+            let update = full_tree_update("窗口", [20, 10], 1.0, &state);
+            let converted = converted_node(&update, u64::try_from(id).unwrap());
+            assert_eq!(converted.role(), *expected);
+            if *role == "文字" {
+                assert_eq!(converted.value(), Some(format!("节点{id}").as_str()));
+                assert_eq!(converted.label(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn builds_a_scaled_full_tree_with_stable_root_and_focus() {
+        let focused = semantic_node(
+            2,
+            "按钮",
+            Data::Bool(true),
+            BTreeMap::from([
+                ("启用".to_owned(), Data::Bool(true)),
+                ("可见".to_owned(), Data::Bool(true)),
+                ("可聚焦".to_owned(), Data::Bool(true)),
+                ("焦点".to_owned(), Data::Bool(true)),
+                ("忙碌".to_owned(), Data::Bool(true)),
+                ("按下".to_owned(), Data::Bool(false)),
+            ]),
+            &["点击", "聚焦"],
+            [10.0, 20.0, 30.0, 40.0],
+            Vec::new(),
+        );
+        let state = state_with(semantic_node(
+            1,
+            "面板",
+            Data::Nil,
+            BTreeMap::new(),
+            &[],
+            [0.0, 0.0, 100.0, 80.0],
+            vec![focused],
+        ));
+        let update = full_tree_update("主窗口", [300, 200], 2.0, &state);
+
+        assert_eq!(update.tree_id, TreeId::ROOT);
+        assert_eq!(update.focus, NodeId(2));
+        let tree = update.tree.as_ref().unwrap();
+        assert_eq!(tree.root, WINDOW_ROOT_ID);
+        assert_eq!(tree.toolkit_name.as_deref(), Some("言台"));
+        assert_eq!(
+            tree.toolkit_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        let root = converted_node(&update, 0);
+        assert_eq!(root.label(), Some("主窗口"));
+        assert_eq!(root.bounds(), Some(Rect::new(0.0, 0.0, 300.0, 200.0)));
+        assert_eq!(root.children(), &[NodeId(1)]);
+        let panel = converted_node(&update, 1);
+        assert_eq!(panel.children(), &[NodeId(2)]);
+        let button = converted_node(&update, 2);
+        assert_eq!(button.bounds(), Some(Rect::new(20.0, 40.0, 80.0, 120.0)));
+        assert_eq!(button.label(), Some("节点2"));
+        assert_eq!(button.description(), Some("说明2"));
+        assert_eq!(button.value(), Some("true"));
+        assert!(button.is_busy());
+        assert_eq!(button.toggled(), Some(Toggled::False));
+        assert!(button.supports_action(Action::Click));
+        assert!(button.supports_action(Action::Focus));
+    }
+
+    #[test]
+    fn maps_all_state_families_to_native_properties() {
+        let disabled = semantic_node(
+            2,
+            "按钮",
+            Data::Nil,
+            BTreeMap::from([
+                ("启用".to_owned(), Data::Bool(false)),
+                ("可见".to_owned(), Data::Bool(false)),
+            ]),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let input = semantic_node(
+            3,
+            "输入框",
+            Data::String("值".to_owned()),
+            BTreeMap::from([
+                ("只读".to_owned(), Data::Bool(true)),
+                ("必填".to_owned(), Data::Bool(true)),
+                ("无效".to_owned(), Data::Bool(true)),
+            ]),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let item = semantic_node(
+            4,
+            "列表项",
+            Data::Nil,
+            BTreeMap::from([
+                ("选中".to_owned(), Data::Bool(false)),
+                ("当前".to_owned(), Data::Bool(true)),
+            ]),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let check = semantic_node(
+            5,
+            "复选框",
+            Data::Nil,
+            BTreeMap::from([
+                ("已检查".to_owned(), Data::Bool(false)),
+                ("混合".to_owned(), Data::Bool(true)),
+            ]),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let combo = semantic_node(
+            6,
+            "组合框",
+            Data::Integer(7),
+            BTreeMap::from([("展开".to_owned(), Data::Bool(false))]),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let list = semantic_node(
+            7,
+            "列表",
+            Data::Nil,
+            BTreeMap::from([("多选".to_owned(), Data::Bool(true))]),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let dialog = semantic_node(
+            8,
+            "对话框",
+            Data::Nil,
+            BTreeMap::from([("模态".to_owned(), Data::Bool(true))]),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let slider = semantic_node(
+            9,
+            "滑块",
+            Data::Number(2.5),
+            BTreeMap::from([("方向".to_owned(), Data::String("横向".to_owned()))]),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let heading = semantic_node(
+            10,
+            "标题",
+            Data::Nil,
+            BTreeMap::from([("级别".to_owned(), Data::Integer(3))]),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let state = state_with(semantic_node(
+            1,
+            "面板",
+            Data::Nil,
+            BTreeMap::new(),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            vec![
+                disabled, input, item, check, combo, list, dialog, slider, heading,
+            ],
+        ));
+        let update = full_tree_update("", [1, 1], 1.0, &state);
+
+        let disabled = converted_node(&update, 2);
+        assert!(disabled.is_disabled());
+        assert!(disabled.is_hidden());
+        let input = converted_node(&update, 3);
+        assert!(input.is_read_only());
+        assert!(input.is_required());
+        assert_eq!(input.invalid(), Some(Invalid::True));
+        assert_eq!(input.value(), Some("值"));
+        let item = converted_node(&update, 4);
+        assert_eq!(item.is_selected(), Some(false));
+        assert_eq!(item.aria_current(), Some(AriaCurrent::True));
+        assert_eq!(converted_node(&update, 5).toggled(), Some(Toggled::Mixed));
+        let combo = converted_node(&update, 6);
+        assert_eq!(combo.is_expanded(), Some(false));
+        assert_eq!(combo.numeric_value(), Some(7.0));
+        assert!(converted_node(&update, 7).is_multiselectable());
+        assert!(converted_node(&update, 8).is_modal());
+        let slider = converted_node(&update, 9);
+        assert_eq!(slider.orientation(), Some(Orientation::Horizontal));
+        assert_eq!(slider.numeric_value(), Some(2.5));
+        assert_eq!(converted_node(&update, 10).level(), Some(3));
+    }
+
+    #[test]
+    fn maps_every_protocol_action_to_a_native_action() {
+        let cases: &[(&str, &str, BTreeMap<String, Data>, Action)] = &[
+            (
+                "聚焦",
+                "按钮",
+                BTreeMap::from([("可聚焦".to_owned(), Data::Bool(true))]),
+                Action::Focus,
+            ),
+            ("点击", "按钮", BTreeMap::new(), Action::Click),
+            ("设置值", "输入框", BTreeMap::new(), Action::SetValue),
+            ("选择", "输入框", BTreeMap::new(), Action::SetTextSelection),
+            ("取消选择", "列表项", BTreeMap::new(), Action::CustomAction),
+            ("复制", "输入框", BTreeMap::new(), Action::CustomAction),
+            ("剪切", "输入框", BTreeMap::new(), Action::CustomAction),
+            ("粘贴", "输入框", BTreeMap::new(), Action::CustomAction),
+            ("展开", "组合框", BTreeMap::new(), Action::Expand),
+            ("折叠", "组合框", BTreeMap::new(), Action::Collapse),
+            ("增加", "滑块", BTreeMap::new(), Action::Increment),
+            ("减少", "滑块", BTreeMap::new(), Action::Decrement),
+            ("滚动", "列表", BTreeMap::new(), Action::ScrollDown),
+            ("滚动到", "图片", BTreeMap::new(), Action::ScrollIntoView),
+            ("显示菜单", "按钮", BTreeMap::new(), Action::ShowContextMenu),
+        ];
+        assert_eq!(cases.len(), SEMANTIC_ACTIONS.len());
+        for (index, (action, role, states, expected)) in cases.iter().enumerate() {
+            assert_eq!(*action, SEMANTIC_ACTIONS[index]);
+            let state = state_with(semantic_node(
+                1,
+                role,
+                Data::Nil,
+                states.clone(),
+                &[*action],
+                [0.0, 0.0, 1.0, 1.0],
+                Vec::new(),
+            ));
+            let update = full_tree_update("", [1, 1], 1.0, &state);
+            assert!(converted_node(&update, 1).supports_action(*expected));
+        }
+    }
+
+    #[test]
+    fn preserves_distinct_click_and_select_actions_and_scroll_directions() {
+        let tab = semantic_node(
+            2,
+            "标签",
+            Data::Nil,
+            BTreeMap::new(),
+            &["点击", "选择", "取消选择"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let scroll = semantic_node(
+            3,
+            "列表",
+            Data::Nil,
+            BTreeMap::new(),
+            &["滚动"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let state = state_with(semantic_node(
+            1,
+            "面板",
+            Data::Nil,
+            BTreeMap::new(),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            vec![tab, scroll],
+        ));
+        let update = full_tree_update("", [1, 1], 1.0, &state);
+        let tab = converted_node(&update, 2);
+        assert!(tab.supports_action(Action::Click));
+        assert!(tab.supports_action(Action::CustomAction));
+        assert_eq!(
+            tab.custom_actions()
+                .iter()
+                .map(|action| (action.id, action.description.as_ref()))
+                .collect::<Vec<_>>(),
+            vec![(CUSTOM_SELECT, "选择"), (CUSTOM_DESELECT, "取消选择")]
+        );
+        let scroll = converted_node(&update, 3);
+        assert!(scroll.supports_action(Action::ScrollUp));
+        assert!(scroll.supports_action(Action::ScrollDown));
+        assert!(scroll.supports_action(Action::ScrollLeft));
+        assert!(scroll.supports_action(Action::ScrollRight));
+    }
+
+    #[test]
+    fn an_empty_semantic_tree_keeps_a_valid_window_root() {
+        let update = full_tree_update("", [0, 0], f64::NAN, &AccessibilityState::default());
+        assert_eq!(update.nodes.len(), 1);
+        assert_eq!(update.focus, WINDOW_ROOT_ID);
+        let root = converted_node(&update, 0);
+        assert!(root.children().is_empty());
+        assert_eq!(root.bounds(), Some(Rect::ZERO));
+        assert_eq!(normalized_scale_factor(0.0), 1.0);
+        assert_eq!(normalized_scale_factor(MAX_NATIVE_SCALE_FACTOR + 1.0), 1.0);
+    }
+
+    #[test]
+    fn activation_reads_the_latest_thread_safe_snapshot() {
+        let mut model = Model::default();
+        let application = model
+            .create(
+                None,
+                ResourceState::Application {
+                    name: "测试".to_owned(),
+                    exit_requested: false,
+                },
+            )
+            .unwrap();
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let model = Arc::new(Mutex::new(model));
+        let snapshot = Arc::new(Mutex::new(NativeTreeSnapshot::new(
+            "初始",
+            [10, 20],
+            1.0,
+            &AccessibilityState::default(),
+        )));
+        let first_snapshot = Arc::clone(&snapshot);
+        let first_model = Arc::clone(&model);
+        let first = std::thread::spawn(move || {
+            NativeActivationHandler::new(first_snapshot, first_model, window)
+                .request_initial_tree()
+                .unwrap()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(converted_node(&first, 0).label(), Some("初始"));
+        assert_eq!(
+            converted_node(&first, 0).bounds(),
+            Some(Rect::new(0.0, 0.0, 10.0, 20.0))
+        );
+
+        let state = state_with(semantic_node(
+            1,
+            "按钮",
+            Data::Nil,
+            BTreeMap::new(),
+            &["点击"],
+            [1.0, 2.0, 3.0, 4.0],
+            Vec::new(),
+        ));
+        snapshot
+            .lock_recover()
+            .replace("更新", [30, 40], 2.0, &state);
+        let second = NativeActivationHandler::new(snapshot, Arc::clone(&model), window)
+            .request_initial_tree()
+            .unwrap();
+        assert_eq!(converted_node(&second, 0).label(), Some("更新"));
+        assert_eq!(converted_node(&second, 0).children(), &[NodeId(1)]);
+        assert_eq!(
+            converted_node(&second, 1).bounds(),
+            Some(Rect::new(2.0, 4.0, 8.0, 12.0))
+        );
+        let metrics = model.lock_recover().accessibility_metrics();
+        assert_eq!(metrics.native_bridges_active, 1);
+        assert_eq!(metrics.native_bridge_activations, 1);
+    }
+
+    #[test]
+    fn exposes_editable_text_as_grapheme_bounded_text_runs() {
+        let value = "A言👨‍👩‍👧‍👦e\u{301}\r\n";
+        let state = state_with(semantic_node(
+            1,
+            "多行输入框",
+            Data::String(value.to_owned()),
+            BTreeMap::new(),
+            &["选择"],
+            [1.0, 2.0, 3.0, 4.0],
+            Vec::new(),
+        ));
+        let update = full_tree_update("", [20, 20], 2.0, &state);
+        let input = converted_node(&update, 1);
+        let run_id = NodeId(TEXT_RUN_ID_MASK | 1);
+        assert_eq!(input.children(), &[run_id]);
+        let run = converted_node(&update, run_id.0);
+        assert_eq!(run.role(), Role::TextRun);
+        assert_eq!(run.value(), Some(value));
+        assert_eq!(run.character_lengths(), &[1, 3, 25, 3, 2]);
+        assert_eq!(run.bounds(), Some(Rect::new(2.0, 4.0, 8.0, 12.0)));
+    }
+
+    #[test]
+    fn empty_inputs_have_a_run_but_passwords_never_do() {
+        let input = semantic_node(
+            2,
+            "输入框",
+            Data::Nil,
+            BTreeMap::new(),
+            &["选择"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let password = semantic_node(
+            3,
+            "密码框",
+            Data::Nil,
+            BTreeMap::new(),
+            &["选择"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let state = state_with(semantic_node(
+            1,
+            "面板",
+            Data::Nil,
+            BTreeMap::new(),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            vec![input, password],
+        ));
+        let update = full_tree_update("", [1, 1], 1.0, &state);
+        let input_run = converted_node(&update, TEXT_RUN_ID_MASK | 2);
+        assert_eq!(input_run.value(), Some(""));
+        assert!(input_run.character_lengths().is_empty());
+        let password = converted_node(&update, 3);
+        assert!(password.children().is_empty());
+        assert!(!password.supports_action(Action::SetTextSelection));
+
+        let oversized_grapheme = format!("a{}", "\u{301}".repeat(200));
+        let lengths = grapheme_byte_lengths(&oversized_grapheme);
+        assert_eq!(
+            lengths
+                .iter()
+                .map(|length| usize::from(*length))
+                .sum::<usize>(),
+            oversized_grapheme.len()
+        );
+        assert!(lengths.len() > 1);
+    }
+
+    #[test]
+    fn translates_focus_click_selection_and_custom_actions() {
+        let state = state_with(semantic_node(
+            1,
+            "按钮",
+            Data::Nil,
+            BTreeMap::from([("可聚焦".to_owned(), Data::Bool(true))]),
+            &["聚焦", "点击"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        ));
+        assert_eq!(
+            translate_action_request(&state, &action_request(Action::Focus, 1, None)),
+            Ok(NativeRequest::Focus { node_id: 1 })
+        );
+        assert_eq!(
+            translate_action_request(&state, &action_request(Action::Click, 1, None)),
+            Ok(NativeRequest::Action {
+                node_id: 1,
+                action: "点击",
+                argument: Data::Nil,
+            })
+        );
+        assert_eq!(
+            translate_action_request(
+                &state,
+                &action_request(Action::Click, 1, Some(ActionData::Value("意外参数".into())),),
+            ),
+            Err(NativeRequestError::Data)
+        );
+
+        let state = state_with(semantic_node(
+            2,
+            "标签",
+            Data::Nil,
+            BTreeMap::new(),
+            &["点击", "选择", "取消选择"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        ));
+        assert_eq!(
+            translate_action_request(
+                &state,
+                &action_request(
+                    Action::CustomAction,
+                    2,
+                    Some(ActionData::CustomAction(CUSTOM_SELECT)),
+                ),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 2,
+                action: "选择",
+                argument: Data::Nil,
+            })
+        );
+        assert_eq!(
+            translate_action_request(
+                &state,
+                &action_request(
+                    Action::CustomAction,
+                    2,
+                    Some(ActionData::CustomAction(CUSTOM_DESELECT)),
+                ),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 2,
+                action: "取消选择",
+                argument: Data::Nil,
+            })
+        );
+    }
+
+    #[test]
+    fn translates_text_selection_to_utf8_byte_boundaries() {
+        let value = "A言👨‍👩‍👧‍👦e\u{301}";
+        let state = state_with(semantic_node(
+            7,
+            "输入框",
+            Data::String(value.to_owned()),
+            BTreeMap::new(),
+            &["选择"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        ));
+        let run = text_run_id(7);
+        let selection = TextSelection {
+            anchor: TextPosition {
+                node: run,
+                character_index: 3,
+            },
+            focus: TextPosition {
+                node: run,
+                character_index: 1,
+            },
+        };
+        assert_eq!(
+            translate_action_request(
+                &state,
+                &action_request(
+                    Action::SetTextSelection,
+                    7,
+                    Some(ActionData::SetTextSelection(selection)),
+                ),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 7,
+                action: "选择",
+                argument: Data::map([("起", Data::Integer(1)), ("终", Data::Integer(29)),]),
+            })
+        );
+
+        let wrong_run = TextSelection {
+            anchor: TextPosition {
+                node: text_run_id(8),
+                character_index: 0,
+            },
+            focus: TextPosition {
+                node: run,
+                character_index: 0,
+            },
+        };
+        assert_eq!(
+            translate_action_request(
+                &state,
+                &action_request(
+                    Action::SetTextSelection,
+                    7,
+                    Some(ActionData::SetTextSelection(wrong_run)),
+                ),
+            ),
+            Err(NativeRequestError::Target)
+        );
+    }
+
+    #[test]
+    fn translates_native_values_scroll_units_and_hints() {
+        let combo = state_with(semantic_node(
+            2,
+            "组合框",
+            Data::Integer(1),
+            BTreeMap::new(),
+            &["设置值"],
+            [0.0, 0.0, 100.0, 50.0],
+            Vec::new(),
+        ));
+        assert_eq!(
+            translate_action_request(
+                &combo,
+                &action_request(Action::SetValue, 2, Some(ActionData::NumericValue(3.0)),),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 2,
+                action: "设置值",
+                argument: Data::Integer(3),
+            })
+        );
+
+        let list = state_with(semantic_node(
+            3,
+            "列表",
+            Data::Nil,
+            BTreeMap::new(),
+            &["滚动", "滚动到"],
+            [0.0, 0.0, 100.0, 50.0],
+            Vec::new(),
+        ));
+        assert_eq!(
+            translate_action_request(
+                &list,
+                &action_request(
+                    Action::ScrollDown,
+                    3,
+                    Some(ActionData::ScrollUnit(ScrollUnit::Page)),
+                ),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 3,
+                action: "滚动",
+                argument: Data::map([("纵向", Data::Number(50.0))]),
+            })
+        );
+        assert_eq!(
+            translate_action_request(
+                &list,
+                &action_request(
+                    Action::ScrollIntoView,
+                    3,
+                    Some(ActionData::ScrollHint(ScrollHint::TopEdge)),
+                ),
+            ),
+            Ok(NativeRequest::Action {
+                node_id: 3,
+                action: "滚动到",
+                argument: Data::Nil,
+            })
+        );
+        assert_eq!(
+            translate_action_request(&list, &action_request(Action::Focus, 0, None)),
+            Err(NativeRequestError::Target)
+        );
+    }
+}

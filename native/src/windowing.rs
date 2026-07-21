@@ -1,11 +1,19 @@
 //! `winit` 事件循环与 `softbuffer` 绘制表面的真实桌面实现。
 
+use crate::accessibility::AccessibilitySource;
 use crate::backend::{HostApi, PlatformResource, monotonic_seconds};
 use crate::data::Data;
 use crate::event::{EventKind, PlatformEvent};
 use crate::model::{DisplayState, Model, ResourceKind, ResourceState, WindowState};
+use crate::native_accessibility::{
+    NativeActivationHandler, NativeRequest, NativeTreeSnapshot, translate_action_request,
+};
 use crate::render::{ImageData, RenderEngine};
 use crate::sync::RecoverMutex;
+use accesskit_winit::{
+    Adapter as AccessibilityAdapter, Event as AccessibilityEvent,
+    WindowEvent as AccessibilityWindowEvent,
+};
 use softbuffer::{Context, Surface};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroU32;
@@ -27,7 +35,18 @@ struct RunningGuard {
     model: Arc<Mutex<Model>>,
 }
 
-static PROXIES: std::sync::OnceLock<Mutex<HashMap<u64, EventLoopProxy<()>>>> =
+enum UserEvent {
+    Wake,
+    Accessibility(AccessibilityEvent),
+}
+
+impl From<AccessibilityEvent> for UserEvent {
+    fn from(event: AccessibilityEvent) -> Self {
+        Self::Accessibility(event)
+    }
+}
+
+static PROXIES: std::sync::OnceLock<Mutex<HashMap<u64, EventLoopProxy<UserEvent>>>> =
     std::sync::OnceLock::new();
 
 struct ProxyGuard {
@@ -47,7 +66,7 @@ pub fn wake(event_loop_id: u64) -> bool {
     PROXIES
         .get()
         .and_then(|proxies| proxies.lock_recover().get(&event_loop_id).cloned())
-        .is_some_and(|proxy| proxy.send_event(()).is_ok())
+        .is_some_and(|proxy| proxy.send_event(UserEvent::Wake).is_ok())
 }
 
 impl Drop for RunningGuard {
@@ -76,17 +95,27 @@ pub fn run(
     let _running = RunningGuard {
         model: model.clone(),
     };
-    let event_loop = EventLoop::new().map_err(|_| "PLATFORM_EVENT_LOOP")?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .map_err(|_| "PLATFORM_EVENT_LOOP")?;
+    let event_loop_proxy = event_loop.create_proxy();
     PROXIES
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock_recover()
-        .insert(host.0.event_loop_id, event_loop.create_proxy());
+        .insert(host.0.event_loop_id, event_loop_proxy.clone());
     let _proxy = ProxyGuard {
         event_loop_id: host.0.event_loop_id,
     };
     let context =
         Context::new(event_loop.owned_display_handle()).map_err(|_| "PLATFORM_SURFACE_CREATE")?;
-    let mut runner = Runner::new(model, host, callback, application_id, context);
+    let mut runner = Runner::new(
+        model,
+        host,
+        callback,
+        application_id,
+        context,
+        event_loop_proxy,
+    );
     event_loop
         .run_app(&mut runner)
         .map_err(|_| "PLATFORM_EVENT_LOOP")?;
@@ -96,7 +125,13 @@ pub fn run(
 struct NativeWindow {
     // 表面必须先于其持有的窗口释放。
     surface: Surface<OwnedDisplayHandle, Arc<Window>>,
+    // 适配器可能引用原生窗口，必须先于窗口释放。
+    accessibility_adapter: AccessibilityAdapter,
     window: Arc<Window>,
+    accessibility_snapshot: Arc<Mutex<NativeTreeSnapshot>>,
+    model: Arc<Mutex<Model>>,
+    accessibility_physical_size: [u32; 2],
+    accessibility_scale_factor: f64,
     applied: WindowState,
     modifiers: ModifiersState,
     pointer_position: [f64; 2],
@@ -110,6 +145,7 @@ struct Runner {
     windows: BTreeMap<u64, NativeWindow>,
     window_ids: HashMap<WindowId, u64>,
     context: Context<OwnedDisplayHandle>,
+    event_loop_proxy: EventLoopProxy<UserEvent>,
     renderer: RenderEngine,
     loaded_fonts: BTreeSet<u64>,
     focused: HashSet<WindowId>,
@@ -124,6 +160,7 @@ impl Runner {
         callback: u64,
         application_id: u64,
         context: Context<OwnedDisplayHandle>,
+        event_loop_proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
         Self {
             model,
@@ -133,6 +170,7 @@ impl Runner {
             windows: BTreeMap::new(),
             window_ids: HashMap::new(),
             context,
+            event_loop_proxy,
             renderer: RenderEngine::new(),
             loaded_fonts: BTreeSet::new(),
             focused: HashSet::new(),
@@ -295,12 +333,12 @@ impl Runner {
         &mut self,
         event_loop: &ActiveEventLoop,
         model_id: u64,
-        state: WindowState,
+        mut state: WindowState,
     ) -> Result<NativeWindow, &'static str> {
         let mut attributes = Window::default_attributes()
             .with_title(state.title.clone())
             .with_inner_size(LogicalSize::new(state.width, state.height))
-            .with_visible(state.visible)
+            .with_visible(false)
             .with_transparent(state.transparent)
             .with_decorations(!state.borderless)
             .with_window_level(window_level(state.always_on_top))
@@ -328,21 +366,51 @@ impl Runner {
         let display = window
             .current_monitor()
             .map(|monitor| display_state(&monitor, primary.as_ref()));
+        state.width = f64::from(inner.width) / scale;
+        state.height = f64::from(inner.height) / scale;
+        state.scale_factor = scale;
+        state.display.clone_from(&display);
         {
             let mut model = self.model.lock_recover();
             if let Ok(node) = model.get_mut(model_id)
                 && let ResourceState::Window(window_state) = &mut node.state
             {
-                window_state.width = f64::from(inner.width) / scale;
-                window_state.height = f64::from(inner.height) / scale;
+                window_state.width = state.width;
+                window_state.height = state.height;
                 window_state.scale_factor = scale;
                 window_state.display = display;
             }
         }
+        let accessibility_physical_size = [inner.width, inner.height];
+        let accessibility_snapshot = Arc::new(Mutex::new(NativeTreeSnapshot::new(
+            &state.title,
+            accessibility_physical_size,
+            scale,
+            &state.accessibility,
+        )));
+        let accessibility_adapter = AccessibilityAdapter::with_mixed_handlers(
+            event_loop,
+            &window,
+            NativeActivationHandler::new(
+                Arc::clone(&accessibility_snapshot),
+                Arc::clone(&self.model),
+                model_id,
+            ),
+            self.event_loop_proxy.clone(),
+        );
+        let applied = WindowState {
+            visible: false,
+            ..WindowState::default()
+        };
         let mut native = NativeWindow {
             surface,
+            accessibility_adapter,
             window,
-            applied: WindowState::default(),
+            accessibility_snapshot,
+            model: Arc::clone(&self.model),
+            accessibility_physical_size,
+            accessibility_scale_factor: scale,
+            applied,
             modifiers: ModifiersState::default(),
             pointer_position: [0.0, 0.0],
         };
@@ -929,7 +997,7 @@ fn frame_presented_event(
     .with("延迟毫秒", latency_milliseconds)
 }
 
-impl ApplicationHandler for Runner {
+impl ApplicationHandler<UserEvent> for Runner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.refresh_environment(event_loop);
         self.sync_model(event_loop);
@@ -947,7 +1015,42 @@ impl ApplicationHandler for Runner {
         let Some(model_id) = self.window_ids.get(&window_id).copied() else {
             return;
         };
+        if let Some(native) = self.windows.get_mut(&model_id) {
+            native
+                .accessibility_adapter
+                .process_event(&native.window, &event);
+        }
         self.handle_window_event(event_loop, window_id, model_id, event);
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        let UserEvent::Accessibility(event) = event else {
+            return;
+        };
+        let Some(model_id) = self.window_ids.get(&event.window_id).copied() else {
+            return;
+        };
+        match event.window_event {
+            AccessibilityWindowEvent::ActionRequested(request) => {
+                let result = {
+                    let mut model = self.model.lock_recover();
+                    dispatch_accessibility_request(&mut model, model_id, &request)
+                };
+                if result == Err("PLATFORM_QUEUE_FULL") {
+                    self.fail("PLATFORM_QUEUE_FULL");
+                }
+            }
+            AccessibilityWindowEvent::AccessibilityDeactivated => self
+                .model
+                .lock_recover()
+                .record_accessibility_bridge_deactivation(model_id),
+            AccessibilityWindowEvent::InitialTreeRequested => {
+                let mut model = self.model.lock_recover();
+                model.record_accessibility_native_request();
+                model.record_accessibility_native_rejection();
+                model.record_accessibility_rejection();
+            }
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -1037,8 +1140,86 @@ fn apply_window_state(native: &mut NativeWindow, state: &WindowState) -> bool {
     if redraw {
         window.request_redraw();
     }
+    sync_accessibility(native, state);
     native.applied.clone_from(state);
     redraw
+}
+
+fn sync_accessibility(native: &mut NativeWindow, state: &WindowState) {
+    let inner = native.window.inner_size();
+    let physical_size = [inner.width, inner.height];
+    let scale_factor = native.window.scale_factor();
+    if native.applied.title == state.title
+        && native.applied.accessibility == state.accessibility
+        && native.accessibility_physical_size == physical_size
+        && native.accessibility_scale_factor == scale_factor
+    {
+        return;
+    }
+    native.accessibility_physical_size = physical_size;
+    native.accessibility_scale_factor = scale_factor;
+    native.accessibility_snapshot.lock_recover().replace(
+        &state.title,
+        physical_size,
+        scale_factor,
+        &state.accessibility,
+    );
+    let snapshot = Arc::clone(&native.accessibility_snapshot);
+    let model = Arc::clone(&native.model);
+    native.accessibility_adapter.update_if_active(move || {
+        model.lock_recover().record_accessibility_native_tree_sync();
+        snapshot.lock_recover().full_update()
+    });
+}
+
+fn dispatch_accessibility_request(
+    model: &mut Model,
+    window_id: u64,
+    request: &accesskit::ActionRequest,
+) -> Result<(), &'static str> {
+    model.record_accessibility_native_request();
+    let translated = (|| {
+        let node = model
+            .get(window_id)
+            .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
+        let ResourceState::Window(window) = &node.state else {
+            return Err("PLATFORM_RESOURCE_TYPE");
+        };
+        translate_action_request(&window.accessibility, request)
+            .map_err(|_| "PLATFORM_ACCESSIBILITY_ACTION")
+    })();
+    let translated = match translated {
+        Ok(request) => request,
+        Err(code) => {
+            model.record_accessibility_rejection();
+            model.record_accessibility_native_rejection();
+            return Err(code);
+        }
+    };
+    let result = match translated {
+        NativeRequest::Focus { node_id } => model.request_accessibility_focus(
+            window_id,
+            node_id,
+            AccessibilitySource::AssistiveTechnology,
+            monotonic_seconds(),
+        ),
+        NativeRequest::Action {
+            node_id,
+            action,
+            argument,
+        } => model.request_accessibility_action(
+            window_id,
+            node_id,
+            action,
+            argument,
+            AccessibilitySource::AssistiveTechnology,
+            monotonic_seconds(),
+        ),
+    };
+    result.map_err(|error| {
+        model.record_accessibility_native_rejection();
+        error.code()
+    })
 }
 
 fn display_state(monitor: &MonitorHandle, primary: Option<&MonitorHandle>) -> DisplayState {
@@ -1206,6 +1387,9 @@ fn image_lookup(host: HostApi, handle: u64) -> Option<ImageData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accessibility::SemanticTree;
+    use crate::event::EventBatcher;
+    use accesskit::{Action, ActionData, ActionRequest, NodeId, TreeId};
     use winit::event::MouseScrollDelta;
     use winit::keyboard::{KeyCode, NamedKey};
 
@@ -1279,5 +1463,75 @@ mod tests {
             panic!("frame latency must be a number")
         };
         assert!((latency - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn native_accessibility_actions_reenter_the_validated_event_queue() {
+        let mut model = Model::default();
+        let application = model
+            .create(
+                None,
+                ResourceState::Application {
+                    name: "测试".to_owned(),
+                    exit_requested: false,
+                },
+            )
+            .unwrap();
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let tree = Data::map([
+            ("编号", Data::Integer(7)),
+            ("角色", Data::String("按钮".to_owned())),
+            (
+                "状态",
+                Data::map([("启用", Data::Bool(true)), ("可见", Data::Bool(true))]),
+            ),
+            ("操作", Data::Array(vec![Data::String("点击".to_owned())])),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 80.into(), 30.into()]),
+            ),
+        ]);
+        let ResourceState::Window(state) = &mut model.get_mut(window).unwrap().state else {
+            panic!("window state expected")
+        };
+        state
+            .accessibility
+            .replace(Some(SemanticTree::validate(&tree).unwrap()))
+            .unwrap();
+        let request = ActionRequest {
+            action: Action::Click,
+            target_tree: TreeId::ROOT,
+            target_node: NodeId(7),
+            data: None,
+        };
+        dispatch_accessibility_request(&mut model, window, &request).unwrap();
+        let batch = model.events.take_data().unwrap();
+        let Data::Array(events) = &batch.as_map().unwrap()["事件"] else {
+            panic!("events expected")
+        };
+        let event = events[0].as_map().unwrap();
+        assert_eq!(event["类型"], Data::String("无障碍动作请求".to_owned()));
+        assert_eq!(event["节点"], Data::Integer(7));
+        assert_eq!(event["动作"], Data::String("点击".to_owned()));
+
+        let malformed = ActionRequest {
+            data: Some(ActionData::Value("意外参数".into())),
+            ..request.clone()
+        };
+        assert_eq!(
+            dispatch_accessibility_request(&mut model, window, &malformed),
+            Err("PLATFORM_ACCESSIBILITY_ACTION")
+        );
+        model.events = EventBatcher::with_capacity(0);
+        assert_eq!(
+            dispatch_accessibility_request(&mut model, window, &request),
+            Err("PLATFORM_QUEUE_FULL")
+        );
+        assert_eq!(model.accessibility_metrics().action_requests, 1);
+        assert_eq!(model.accessibility_metrics().rejected, 2);
+        assert_eq!(model.accessibility_metrics().native_requests, 3);
+        assert_eq!(model.accessibility_metrics().native_rejected, 2);
     }
 }

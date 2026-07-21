@@ -11,6 +11,7 @@ pub mod data;
 pub mod draw;
 pub mod event;
 pub mod model;
+mod native_accessibility;
 pub mod protocol;
 pub mod render;
 pub mod sync;

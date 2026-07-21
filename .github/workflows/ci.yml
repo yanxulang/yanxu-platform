@@ -97,12 +97,18 @@ jobs:
           "$core" 文 src/主.yx "$RUNNER_TEMP/API.md"
           cmp api/api-v1.json "$RUNNER_TEMP/api-v1.json"
           cmp docs/API.md "$RUNNER_TEMP/API.md"
-      - name: Linux 虚拟显示真实窗口自动退出冒烟
-        if: runner.os == 'Linux'
+      - name: 六目标真实窗口与原生无障碍桥自动退出冒烟
         shell: bash
         run: |
-          core="$GITHUB_WORKSPACE/yanxu-core/target/debug/yanxu"
-          xvfb-run -a "$core" 字节 examples/最小窗口.yx
+          set -euo pipefail
+          suffix=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then suffix=".exe"; fi
+          core="$GITHUB_WORKSPACE/yanxu-core/target/debug/yanxu$suffix"
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            xvfb-run -a "$core" 字节 examples/最小窗口.yx
+          else
+            "$core" 字节 examples/最小窗口.yx
+          fi
       - name: 核对 ABI v2 导出与制品摘要
         shell: bash
         env:
@@ -173,21 +179,21 @@ jobs:
         run: |
           set -euo pipefail
           sh scripts/verify-release-source.sh
-          grep -F '29768490886' docs/ARTIFACT_PROVENANCE.md
-          grep -F '66bbe967eb10d10276d9d4a8ba5aa34561e632cb' docs/ARTIFACT_PROVENANCE.md
+          grep -F '29797441928' docs/ARTIFACT_PROVENANCE.md
+          grep -F '43ab3284bb6f9f67f9428c502d01fc9bfaf76490' docs/ARTIFACT_PROVENANCE.md
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
-            -czf yanxu-platform-0.6.0-six-targets.tar.gz \
+            -czf yanxu-platform-0.7.0-six-targets.tar.gz \
             .gitattributes .github .gitignore src native vendor api docs examples tests dist scripts \
             Cargo.toml Cargo.lock deny.toml 言序.toml 言序.toml.in \
             README.md CHANGELOG.md SECURITY.md LICENSE-MIT LICENSE-APACHE
-          sha256sum yanxu-platform-0.6.0-six-targets.tar.gz \
-            > yanxu-platform-0.6.0-six-targets.sha256
-          cp 言序.toml yanxu-platform-0.6.0.toml
+          sha256sum yanxu-platform-0.7.0-six-targets.tar.gz \
+            > yanxu-platform-0.7.0-six-targets.sha256
+          cp 言序.toml yanxu-platform-0.7.0.toml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: yanxu-platform-six-targets
           path: |
-            yanxu-platform-0.6.0-six-targets.tar.gz
-            yanxu-platform-0.6.0-six-targets.sha256
-            yanxu-platform-0.6.0.toml
+            yanxu-platform-0.7.0-six-targets.tar.gz
+            yanxu-platform-0.7.0-six-targets.sha256
+            yanxu-platform-0.7.0.toml
           if-no-files-found: error

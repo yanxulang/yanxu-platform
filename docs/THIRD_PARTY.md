@@ -5,6 +5,8 @@
 
 | 依赖 | 固定版本 | 用途 | 许可 |
 | --- | --- | --- | --- |
+| `accesskit` | 0.24.1 | 跨 UIA、NSAccessibility 与 AT-SPI 的语义节点和动作模型 | MIT OR Apache-2.0 |
+| `accesskit_winit` | 0.33.2 | 原生窗口适配器生命周期、激活、树同步和动作代理 | Apache-2.0 |
 | `winit` | 0.30.13 | Windows、macOS、Wayland、X11 窗口与输入事件 | Apache-2.0 |
 | `softbuffer` | 0.4.8 | 无 GPU 要求的原生窗口 CPU 表面 | MIT OR Apache-2.0 |
 | `tiny-skia` | 0.11.4 | 跨平台一致的二维栅格化 | BSD-3-Clause |
@@ -12,13 +14,19 @@
 | `image` | 0.25.10 | 有界 PNG/JPEG 解码 | MIT OR Apache-2.0 |
 | `arboard` | 3.6.1 | 有界 UTF-8 与 RGBA8 系统剪贴板 | MIT OR Apache-2.0 |
 | `rfd` | 0.17.2 | 原生文件和目录对话框 | MIT |
+| `unicode-segmentation` | 1.13.3 | Unicode 字素到 UTF-8 无障碍选区边界 | MIT OR Apache-2.0 |
 
 这些依赖不向言序 API 暴露自身类型或平台句柄。`winit + softbuffer + tiny-skia` 相比
 浏览器/WebView 路线保留真正原生桌面窗口；相比首版直接采用 GPU 栈，能在虚拟机、
 远程桌面和无硬件加速环境维持同一绘制结果。`cosmic-text` 0.19 使用仍受维护的
 HarfRust 整形链，替代旧版已停止维护的 RustyBuzz 链。
 
-0.6.0 继续为 `arboard` 启用 `image-data` 功能，以便在六个目标读取和写入 RGBA8 图片。
+0.7.0 为 `accesskit_winit` 精确启用 `rwh_06`、Unix 适配器与 `async-io` 执行器；Windows
+和 macOS 由目标依赖分别解析到 UIA 与 NSAccessibility，Linux 解析到 AT-SPI。它与现有
+`winit 0.30.13` 合并为同一窗口依赖，不引入第二套事件循环。`unicode-segmentation`只在
+已通过 65536 字节单字段上限的输入值上运行，异常长字素会有界回退为 Unicode 标量。
+
+0.7.0 继续为 `arboard` 启用 `image-data` 功能，以便在六个目标读取和写入 RGBA8 图片。
 该功能增加 `tiff` 及其 `fax`、`half`、`weezl` 等传递构建依赖；言台不向公开 API 暴露
 这些编解码器，也不接受 TIFF 字节输入。所有版本由 `Cargo.lock` 固定并进入同一许可、
 来源与公告门禁。
