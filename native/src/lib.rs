@@ -78,6 +78,8 @@ static FUNCTIONS: &[(&[u8], Operation)] = &[
     ("帧提交反馈".as_bytes(), Operation::SubmitFrameFeedback),
     ("无障碍更新".as_bytes(), Operation::AccessibilityUpdate),
     ("无障碍查询".as_bytes(), Operation::AccessibilityQuery),
+    ("配额查询".as_bytes(), Operation::ResourceLimitsQuery),
+    ("配额配置".as_bytes(), Operation::ResourceLimitsConfigure),
 ];
 
 #[unsafe(no_mangle)]
@@ -216,6 +218,9 @@ mod ffi_tests {
         assert_eq!(descriptor.struct_size, std::mem::size_of::<NativeModule>());
         assert_eq!(descriptor.name_length, MODULE_NAME.len());
         assert_eq!(descriptor.function_count, FUNCTIONS.len());
+        assert_eq!(descriptor.function_count, 41);
+        assert_eq!(FUNCTIONS[39].0, "配额查询".as_bytes());
+        assert_eq!(FUNCTIONS[40].0, "配额配置".as_bytes());
         assert_eq!(descriptor.resource_type_count, RESOURCE_TYPES.len());
         assert!(descriptor.free_value.is_some());
     }
