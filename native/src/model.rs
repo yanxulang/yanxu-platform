@@ -8,6 +8,17 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::time::{Duration, Instant};
 
+pub const MAX_APPLICATION_RESOURCES: usize = 4_096;
+pub const MAX_APPLICATION_WINDOWS: usize = 64;
+pub const MAX_APPLICATION_TIMERS: usize = 2_048;
+pub const MAX_APPLICATION_IMAGES: usize = 256;
+pub const MAX_APPLICATION_FONTS: usize = 64;
+pub const MAX_APPLICATION_IMAGE_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_APPLICATION_FONT_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_APPLICATION_FRAME_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_APPLICATION_ACCESSIBILITY_NODES: usize = 65_536;
+pub const MAX_APPLICATION_ACCESSIBILITY_TEXT_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
     Application,
@@ -15,6 +26,217 @@ pub enum ResourceKind {
     Timer,
     Image,
     Font,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    pub resources: usize,
+    pub windows: usize,
+    pub timers: usize,
+    pub images: usize,
+    pub fonts: usize,
+    pub image_bytes: usize,
+    pub font_bytes: usize,
+    pub frame_bytes: usize,
+    pub accessibility_nodes: usize,
+    pub accessibility_text_bytes: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            resources: MAX_APPLICATION_RESOURCES,
+            windows: MAX_APPLICATION_WINDOWS,
+            timers: MAX_APPLICATION_TIMERS,
+            images: MAX_APPLICATION_IMAGES,
+            fonts: MAX_APPLICATION_FONTS,
+            image_bytes: MAX_APPLICATION_IMAGE_BYTES,
+            font_bytes: MAX_APPLICATION_FONT_BYTES,
+            frame_bytes: MAX_APPLICATION_FRAME_BYTES,
+            accessibility_nodes: MAX_APPLICATION_ACCESSIBILITY_NODES,
+            accessibility_text_bytes: MAX_APPLICATION_ACCESSIBILITY_TEXT_BYTES,
+        }
+    }
+}
+
+impl ResourceLimits {
+    pub fn validate(self) -> Result<Self, QuotaKind> {
+        let maximum = Self::default();
+        for (value, limit, kind) in [
+            (self.resources, maximum.resources, QuotaKind::Resources),
+            (self.windows, maximum.windows, QuotaKind::Windows),
+            (self.timers, maximum.timers, QuotaKind::Timers),
+            (self.images, maximum.images, QuotaKind::Images),
+            (self.fonts, maximum.fonts, QuotaKind::Fonts),
+            (self.image_bytes, maximum.image_bytes, QuotaKind::ImageBytes),
+            (self.font_bytes, maximum.font_bytes, QuotaKind::FontBytes),
+            (self.frame_bytes, maximum.frame_bytes, QuotaKind::FrameBytes),
+            (
+                self.accessibility_nodes,
+                maximum.accessibility_nodes,
+                QuotaKind::AccessibilityNodes,
+            ),
+            (
+                self.accessibility_text_bytes,
+                maximum.accessibility_text_bytes,
+                QuotaKind::AccessibilityTextBytes,
+            ),
+        ] {
+            if value > limit || (kind == QuotaKind::Resources && value == 0) {
+                return Err(kind);
+            }
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResourceUsage {
+    pub resources: usize,
+    pub windows: usize,
+    pub timers: usize,
+    pub images: usize,
+    pub fonts: usize,
+    pub image_bytes: usize,
+    pub font_bytes: usize,
+    pub frame_bytes: usize,
+    pub accessibility_nodes: usize,
+    pub accessibility_text_bytes: usize,
+}
+
+impl ResourceUsage {
+    fn checked_add(self, other: Self) -> Option<Self> {
+        Some(Self {
+            resources: self.resources.checked_add(other.resources)?,
+            windows: self.windows.checked_add(other.windows)?,
+            timers: self.timers.checked_add(other.timers)?,
+            images: self.images.checked_add(other.images)?,
+            fonts: self.fonts.checked_add(other.fonts)?,
+            image_bytes: self.image_bytes.checked_add(other.image_bytes)?,
+            font_bytes: self.font_bytes.checked_add(other.font_bytes)?,
+            frame_bytes: self.frame_bytes.checked_add(other.frame_bytes)?,
+            accessibility_nodes: self
+                .accessibility_nodes
+                .checked_add(other.accessibility_nodes)?,
+            accessibility_text_bytes: self
+                .accessibility_text_bytes
+                .checked_add(other.accessibility_text_bytes)?,
+        })
+    }
+
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        Some(Self {
+            resources: self.resources.checked_sub(other.resources)?,
+            windows: self.windows.checked_sub(other.windows)?,
+            timers: self.timers.checked_sub(other.timers)?,
+            images: self.images.checked_sub(other.images)?,
+            fonts: self.fonts.checked_sub(other.fonts)?,
+            image_bytes: self.image_bytes.checked_sub(other.image_bytes)?,
+            font_bytes: self.font_bytes.checked_sub(other.font_bytes)?,
+            frame_bytes: self.frame_bytes.checked_sub(other.frame_bytes)?,
+            accessibility_nodes: self
+                .accessibility_nodes
+                .checked_sub(other.accessibility_nodes)?,
+            accessibility_text_bytes: self
+                .accessibility_text_bytes
+                .checked_sub(other.accessibility_text_bytes)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaKind {
+    Resources,
+    Windows,
+    Timers,
+    Images,
+    Fonts,
+    ImageBytes,
+    FontBytes,
+    FrameBytes,
+    AccessibilityNodes,
+    AccessibilityTextBytes,
+}
+
+impl QuotaKind {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Resources => "PLATFORM_QUOTA_RESOURCES",
+            Self::Windows => "PLATFORM_QUOTA_WINDOWS",
+            Self::Timers => "PLATFORM_QUOTA_TIMERS",
+            Self::Images => "PLATFORM_QUOTA_IMAGES",
+            Self::Fonts => "PLATFORM_QUOTA_FONTS",
+            Self::ImageBytes => "PLATFORM_QUOTA_IMAGE_BYTES",
+            Self::FontBytes => "PLATFORM_QUOTA_FONT_BYTES",
+            Self::FrameBytes => "PLATFORM_QUOTA_FRAME_BYTES",
+            Self::AccessibilityNodes => "PLATFORM_QUOTA_ACCESSIBILITY_NODES",
+            Self::AccessibilityTextBytes => "PLATFORM_QUOTA_ACCESSIBILITY_TEXT_BYTES",
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Resources => "资源总数",
+            Self::Windows => "窗口数",
+            Self::Timers => "计时器数",
+            Self::Images => "图片数",
+            Self::Fonts => "字体数",
+            Self::ImageBytes => "图片字节",
+            Self::FontBytes => "字体字节",
+            Self::FrameBytes => "帧字节",
+            Self::AccessibilityNodes => "无障碍节点",
+            Self::AccessibilityTextBytes => "无障碍文字字节",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QuotaMetrics {
+    pub rejected: u64,
+    pub limit_rejected: u64,
+    pub configuration_rejected: u64,
+    pub locked_rejected: u64,
+    pub resources: u64,
+    pub windows: u64,
+    pub timers: u64,
+    pub images: u64,
+    pub fonts: u64,
+    pub image_bytes: u64,
+    pub font_bytes: u64,
+    pub frame_bytes: u64,
+    pub accessibility_nodes: u64,
+    pub accessibility_text_bytes: u64,
+}
+
+impl QuotaMetrics {
+    fn record_limit(&mut self, kind: QuotaKind) {
+        self.rejected = self.rejected.saturating_add(1);
+        self.limit_rejected = self.limit_rejected.saturating_add(1);
+        let counter = match kind {
+            QuotaKind::Resources => &mut self.resources,
+            QuotaKind::Windows => &mut self.windows,
+            QuotaKind::Timers => &mut self.timers,
+            QuotaKind::Images => &mut self.images,
+            QuotaKind::Fonts => &mut self.fonts,
+            QuotaKind::ImageBytes => &mut self.image_bytes,
+            QuotaKind::FontBytes => &mut self.font_bytes,
+            QuotaKind::FrameBytes => &mut self.frame_bytes,
+            QuotaKind::AccessibilityNodes => &mut self.accessibility_nodes,
+            QuotaKind::AccessibilityTextBytes => &mut self.accessibility_text_bytes,
+        };
+        *counter = counter.saturating_add(1);
+    }
+
+    fn record_configuration(&mut self) {
+        self.rejected = self.rejected.saturating_add(1);
+        self.configuration_rejected = self.configuration_rejected.saturating_add(1);
+    }
+
+    fn record_locked(&mut self) {
+        self.rejected = self.rejected.saturating_add(1);
+        self.locked_rejected = self.locked_rejected.saturating_add(1);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +267,61 @@ pub struct WindowState {
     pub cursor: String,
     pub cursor_visible: bool,
     pub accessibility: AccessibilityState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationLifecycle {
+    Ready,
+    Running,
+    ExitRequested,
+    Exited,
+    Closed,
+}
+
+impl ApplicationLifecycle {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ready => "就绪",
+            Self::Running => "运行中",
+            Self::ExitRequested => "退出请求",
+            Self::Exited => "已退出",
+            Self::Closed => "已关闭",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationState {
+    pub name: String,
+    lifecycle: ApplicationLifecycle,
+    event_loop_active: bool,
+    exit_error: Option<&'static str>,
+}
+
+impl ApplicationState {
+    #[must_use]
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            lifecycle: ApplicationLifecycle::Ready,
+            event_loop_active: false,
+            exit_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApplicationLifecycleMetrics {
+    pub runs_started: u64,
+    pub exit_requests: u64,
+    pub duplicate_exit_requests: u64,
+    pub exits: u64,
+    pub normal_exits: u64,
+    pub failed_exits: u64,
+    pub closes: u64,
+    pub resources_reclaimed: u64,
+    pub zeroed_closes: u64,
 }
 
 impl Default for WindowState {
@@ -99,10 +376,7 @@ pub struct DisplayState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResourceState {
-    Application {
-        name: String,
-        exit_requested: bool,
-    },
+    Application(ApplicationState),
     Window(Box<WindowState>),
     Timer(TimerState),
     Image {
@@ -120,12 +394,38 @@ impl ResourceState {
     #[must_use]
     pub const fn kind(&self) -> ResourceKind {
         match self {
-            Self::Application { .. } => ResourceKind::Application,
+            Self::Application(_) => ResourceKind::Application,
             Self::Window(_) => ResourceKind::Window,
             Self::Timer(_) => ResourceKind::Timer,
             Self::Image { .. } => ResourceKind::Image,
             Self::Font { .. } => ResourceKind::Font,
         }
+    }
+
+    fn usage(&self) -> ResourceUsage {
+        let mut usage = ResourceUsage {
+            resources: 1,
+            ..ResourceUsage::default()
+        };
+        match self {
+            Self::Application(_) => {}
+            Self::Window(window) => {
+                usage.windows = 1;
+                usage.frame_bytes = window.frame.len();
+                usage.accessibility_nodes = window.accessibility.node_count();
+                usage.accessibility_text_bytes = window.accessibility.text_bytes();
+            }
+            Self::Timer(_) => usage.timers = 1,
+            Self::Image { rgba, .. } => {
+                usage.images = 1;
+                usage.image_bytes = rgba.len();
+            }
+            Self::Font { bytes, .. } => {
+                usage.fonts = 1;
+                usage.font_bytes = bytes.as_ref().map_or(0, Vec::len);
+            }
+        }
+        usage
     }
 }
 
@@ -193,6 +493,40 @@ pub enum ModelError {
     Kind(u64),
     FrameSequence,
     Overflow,
+    Quota(QuotaKind),
+    QuotaConfiguration(QuotaKind),
+    QuotaLocked,
+    ApplicationRunning,
+    ApplicationExited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceCreationError {
+    Model(ModelError),
+    Queue(EventQueueError),
+}
+
+impl Display for ResourceCreationError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Model(error) => Display::fmt(error, formatter),
+            Self::Queue(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for ResourceCreationError {}
+
+impl From<ModelError> for ResourceCreationError {
+    fn from(error: ModelError) -> Self {
+        Self::Model(error)
+    }
+}
+
+impl From<EventQueueError> for ResourceCreationError {
+    fn from(error: EventQueueError) -> Self {
+        Self::Queue(error)
+    }
 }
 
 impl Display for ModelError {
@@ -203,6 +537,13 @@ impl Display for ModelError {
             Self::Kind(id) => write!(formatter, "平台资源 {id} 类型不允许此操作"),
             Self::FrameSequence => formatter.write_str("平台帧序号已耗尽"),
             Self::Overflow => formatter.write_str("平台资源编号已耗尽"),
+            Self::Quota(kind) => write!(formatter, "平台应用{}配额已耗尽", kind.name()),
+            Self::QuotaConfiguration(kind) => {
+                write!(formatter, "平台应用{}配额配置无效", kind.name())
+            }
+            Self::QuotaLocked => formatter.write_str("平台应用资源配额已经冻结"),
+            Self::ApplicationRunning => formatter.write_str("平台应用事件循环已经运行"),
+            Self::ApplicationExited => formatter.write_str("平台应用已经退出，不能再次运行"),
         }
     }
 }
@@ -222,6 +563,9 @@ impl AccessibilityModelError {
         match self {
             Self::Model(ModelError::Missing(_)) => "PLATFORM_RESOURCE_CLOSED",
             Self::Model(ModelError::Kind(_)) => "PLATFORM_RESOURCE_TYPE",
+            Self::Model(ModelError::Quota(kind)) => kind.code(),
+            Self::Model(ModelError::QuotaConfiguration(_)) => "PLATFORM_QUOTA_CONFIG",
+            Self::Model(ModelError::QuotaLocked) => "PLATFORM_QUOTA_LOCKED",
             Self::Model(_) => "PLATFORM_RESOURCE",
             Self::Accessibility(error) => error.code(),
             Self::Queue(EventQueueError::Full) => "PLATFORM_QUEUE_FULL",
@@ -264,12 +608,16 @@ impl From<EventQueueError> for AccessibilityModelError {
 pub struct Model {
     next_id: u64,
     resources: BTreeMap<u64, ResourceNode>,
+    resource_limits: ResourceLimits,
+    resource_limits_locked: bool,
+    resource_usage: ResourceUsage,
+    quota_metrics: QuotaMetrics,
     resource_metrics: ResourceMetrics,
+    application_metrics: ApplicationLifecycleMetrics,
     frame_metrics: FrameMetrics,
     accessibility_metrics: AccessibilityMetrics,
     active_accessibility_bridges: BTreeSet<u64>,
     pub events: EventBatcher,
-    pub running: bool,
     pub displays: Vec<DisplayState>,
     pub system_theme: String,
 }
@@ -279,12 +627,16 @@ impl Default for Model {
         Self {
             next_id: 1,
             resources: BTreeMap::new(),
+            resource_limits: ResourceLimits::default(),
+            resource_limits_locked: false,
+            resource_usage: ResourceUsage::default(),
+            quota_metrics: QuotaMetrics::default(),
             resource_metrics: ResourceMetrics::default(),
+            application_metrics: ApplicationLifecycleMetrics::default(),
             frame_metrics: FrameMetrics::default(),
             accessibility_metrics: AccessibilityMetrics::default(),
             active_accessibility_bridges: BTreeSet::new(),
             events: EventBatcher::default(),
-            running: false,
             displays: Vec::new(),
             system_theme: "系统".to_owned(),
         }
@@ -292,20 +644,24 @@ impl Default for Model {
 }
 
 impl Model {
-    pub fn create(&mut self, parent: Option<u64>, state: ResourceState) -> Result<u64, ModelError> {
-        if let Some(parent_id) = parent {
-            let parent_node = self
-                .resources
-                .get(&parent_id)
-                .ok_or(ModelError::Missing(parent_id))?;
-            if !allowed_parent(parent_node.state.kind(), state.kind()) {
-                return Err(ModelError::Parent(parent_id));
-            }
-        } else if state.kind() != ResourceKind::Application {
-            return Err(ModelError::Parent(0));
+    #[must_use]
+    pub fn with_limits(resource_limits: ResourceLimits) -> Self {
+        Self {
+            resource_limits: resource_limits
+                .validate()
+                .expect("model limits must not exceed application maxima"),
+            ..Self::default()
         }
+    }
+
+    pub fn create(&mut self, parent: Option<u64>, state: ResourceState) -> Result<u64, ModelError> {
+        let kind = state.kind();
+        let next_usage = self.prepare_create(parent, &state)?;
         let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).ok_or(ModelError::Overflow)?;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("preflight resource identifier must remain valid");
         self.resources.insert(
             id,
             ResourceNode {
@@ -315,6 +671,10 @@ impl Model {
                 state,
             },
         );
+        self.resource_usage = next_usage;
+        if kind != ResourceKind::Application {
+            self.resource_limits_locked = true;
+        }
         if let Some(parent_id) = parent {
             self.resources
                 .get_mut(&parent_id)
@@ -328,6 +688,70 @@ impl Model {
             .high_watermark
             .max(self.resource_metrics.live);
         self.resource_metrics.created = self.resource_metrics.created.saturating_add(1);
+        Ok(id)
+    }
+
+    pub fn preflight_create(
+        &mut self,
+        parent: Option<u64>,
+        state: &ResourceState,
+    ) -> Result<(), ModelError> {
+        self.prepare_create(parent, state).map(drop)
+    }
+
+    fn prepare_create(
+        &mut self,
+        parent: Option<u64>,
+        state: &ResourceState,
+    ) -> Result<ResourceUsage, ModelError> {
+        let kind = state.kind();
+        if let Some(parent_id) = parent {
+            let parent_node = self
+                .resources
+                .get(&parent_id)
+                .ok_or(ModelError::Missing(parent_id))?;
+            if !allowed_parent(parent_node.state.kind(), kind) {
+                return Err(ModelError::Parent(parent_id));
+            }
+        } else if kind != ResourceKind::Application {
+            return Err(ModelError::Parent(0));
+        }
+        let added_usage = state.usage();
+        let next_usage = self.checked_resource_usage(added_usage)?;
+        self.next_id.checked_add(1).ok_or(ModelError::Overflow)?;
+        Ok(next_usage)
+    }
+
+    pub fn create_with_events(
+        &mut self,
+        parent: Option<u64>,
+        state: ResourceState,
+        events: impl FnOnce(u64) -> Vec<PlatformEvent>,
+    ) -> Result<u64, ResourceCreationError> {
+        let previous_next_id = self.next_id;
+        let previous_limits_locked = self.resource_limits_locked;
+        let previous_usage = self.resource_usage;
+        let previous_metrics = self.resource_metrics;
+        let id = self.create(parent, state)?;
+        if let Err(error) = self.events.push_batch(events(id)) {
+            let removed = self
+                .resources
+                .remove(&id)
+                .expect("newly created resource must exist during rollback");
+            debug_assert_eq!(removed.parent, parent);
+            if let Some(parent_id) = parent {
+                self.resources
+                    .get_mut(&parent_id)
+                    .expect("validated parent must exist during rollback")
+                    .children
+                    .remove(&id);
+            }
+            self.next_id = previous_next_id;
+            self.resource_limits_locked = previous_limits_locked;
+            self.resource_usage = previous_usage;
+            self.resource_metrics = previous_metrics;
+            return Err(error.into());
+        }
         Ok(id)
     }
 
@@ -365,16 +789,130 @@ impl Model {
 
     #[must_use]
     pub fn application_exit_requested(&self, id: u64) -> Option<bool> {
-        let ResourceState::Application { exit_requested, .. } = &self.get(id).ok()?.state else {
+        let ResourceState::Application(application) = &self.get(id).ok()?.state else {
             return None;
         };
-        Some(*exit_requested)
+        Some(application.lifecycle == ApplicationLifecycle::ExitRequested)
+    }
+
+    #[must_use]
+    pub fn application_lifecycle(&self, id: u64) -> ApplicationLifecycle {
+        let Some(ResourceNode {
+            state: ResourceState::Application(application),
+            ..
+        }) = self.resources.get(&id)
+        else {
+            return ApplicationLifecycle::Closed;
+        };
+        application.lifecycle
+    }
+
+    #[must_use]
+    pub fn application_lifecycle_summary(&self) -> ApplicationLifecycle {
+        self.resources
+            .values()
+            .find_map(|node| match &node.state {
+                ResourceState::Application(application) => Some(application.lifecycle),
+                _ => None,
+            })
+            .unwrap_or(ApplicationLifecycle::Closed)
+    }
+
+    #[must_use]
+    pub fn application_exit_error(&self) -> Option<&'static str> {
+        self.resources.values().find_map(|node| match &node.state {
+            ResourceState::Application(application) => application.exit_error,
+            _ => None,
+        })
+    }
+
+    #[must_use]
+    pub fn event_loop_active(&self) -> bool {
+        self.resources.values().any(|node| {
+            matches!(
+                &node.state,
+                ResourceState::Application(application) if application.event_loop_active
+            )
+        })
+    }
+
+    pub fn begin_application_run(&mut self, id: u64) -> Result<(), ModelError> {
+        {
+            let node = self.get_mut(id)?;
+            let ResourceState::Application(application) = &mut node.state else {
+                return Err(ModelError::Kind(id));
+            };
+            if application.event_loop_active {
+                return Err(ModelError::ApplicationRunning);
+            }
+            if application.lifecycle == ApplicationLifecycle::Exited {
+                return Err(ModelError::ApplicationExited);
+            }
+            application.event_loop_active = true;
+            if application.lifecycle != ApplicationLifecycle::ExitRequested {
+                application.lifecycle = ApplicationLifecycle::Running;
+            }
+            application.exit_error = None;
+        }
+        self.resource_limits_locked = true;
+        self.application_metrics.runs_started =
+            self.application_metrics.runs_started.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn finish_application_run(&mut self, id: u64, error: Option<&'static str>) {
+        {
+            let Ok(node) = self.get_mut(id) else {
+                return;
+            };
+            let ResourceState::Application(application) = &mut node.state else {
+                return;
+            };
+            if !application.event_loop_active {
+                return;
+            }
+            application.event_loop_active = false;
+            application.lifecycle = ApplicationLifecycle::Exited;
+            application.exit_error = error;
+        }
+        let metrics = &mut self.application_metrics;
+        metrics.exits = metrics.exits.saturating_add(1);
+        if error.is_some() {
+            metrics.failed_exits = metrics.failed_exits.saturating_add(1);
+        } else {
+            metrics.normal_exits = metrics.normal_exits.saturating_add(1);
+        }
+    }
+
+    pub fn request_application_exit(&mut self, id: u64) -> Result<bool, ModelError> {
+        let node = self.get_mut(id)?;
+        let ResourceState::Application(application) = &mut node.state else {
+            return Err(ModelError::Kind(id));
+        };
+        if matches!(
+            application.lifecycle,
+            ApplicationLifecycle::ExitRequested | ApplicationLifecycle::Exited
+        ) {
+            self.application_metrics.duplicate_exit_requests = self
+                .application_metrics
+                .duplicate_exit_requests
+                .saturating_add(1);
+            return Ok(false);
+        }
+        application.lifecycle = ApplicationLifecycle::ExitRequested;
+        self.application_metrics.exit_requests =
+            self.application_metrics.exit_requests.saturating_add(1);
+        Ok(true)
     }
 
     pub fn close(&mut self, id: u64) -> Result<Vec<u64>, ModelError> {
         if !self.resources.contains_key(&id) {
             return Err(ModelError::Missing(id));
         }
+        let closing_application = self
+            .resources
+            .get(&id)
+            .is_some_and(|node| matches!(node.state, ResourceState::Application(_)));
         let mut order = Vec::new();
         self.collect_close_order(id, &mut order);
         let pending_frames = order
@@ -411,6 +949,14 @@ impl Model {
             .iter()
             .filter(|closing| self.active_accessibility_bridges.remove(closing))
             .count();
+        let closed_usage = order
+            .iter()
+            .filter_map(|closing| self.resources.get(closing))
+            .fold(ResourceUsage::default(), |total, node| {
+                total
+                    .checked_add(node.state.usage())
+                    .expect("tracked resource usage must not overflow")
+            });
         for closing in &order {
             if let Some(node) = self.resources.remove(closing)
                 && let Some(parent) = node.parent
@@ -420,6 +966,10 @@ impl Model {
             }
         }
         self.resource_metrics.live = self.resources.len();
+        self.resource_usage = self
+            .resource_usage
+            .checked_sub(closed_usage)
+            .expect("closed resources must have tracked usage");
         self.resource_metrics.closed = self
             .resource_metrics
             .closed
@@ -445,6 +995,16 @@ impl Model {
             .accessibility_metrics
             .native_bridge_deactivations
             .saturating_add(active_accessibility_bridges as u64);
+        if closing_application {
+            let metrics = &mut self.application_metrics;
+            metrics.closes = metrics.closes.saturating_add(1);
+            metrics.resources_reclaimed = metrics
+                .resources_reclaimed
+                .saturating_add(u64::try_from(order.len()).unwrap_or(u64::MAX));
+            if self.resource_usage == ResourceUsage::default() {
+                metrics.zeroed_closes = metrics.zeroed_closes.saturating_add(1);
+            }
+        }
         Ok(order)
     }
 
@@ -461,6 +1021,88 @@ impl Model {
         self.resource_metrics
     }
 
+    #[must_use]
+    pub const fn application_metrics(&self) -> ApplicationLifecycleMetrics {
+        self.application_metrics
+    }
+
+    #[must_use]
+    pub const fn resource_limits(&self) -> ResourceLimits {
+        self.resource_limits
+    }
+
+    pub fn configure_resource_limits(
+        &mut self,
+        limits: ResourceLimits,
+    ) -> Result<ResourceLimits, ModelError> {
+        let limits = match limits.validate() {
+            Ok(limits) => limits,
+            Err(kind) => {
+                self.quota_metrics.record_configuration();
+                return Err(ModelError::QuotaConfiguration(kind));
+            }
+        };
+        if self.resource_limits_locked || self.event_loop_active() {
+            self.quota_metrics.record_locked();
+            return Err(ModelError::QuotaLocked);
+        }
+        if let Some(kind) = quota_exceeded(self.resource_usage, limits) {
+            self.quota_metrics.record_configuration();
+            return Err(ModelError::QuotaConfiguration(kind));
+        }
+        self.resource_limits = limits;
+        Ok(limits)
+    }
+
+    pub fn lock_resource_limits(&mut self) {
+        self.resource_limits_locked = true;
+    }
+
+    #[must_use]
+    pub const fn resource_limits_locked(&self) -> bool {
+        self.resource_limits_locked
+    }
+
+    #[must_use]
+    pub const fn resource_usage(&self) -> ResourceUsage {
+        self.resource_usage
+    }
+
+    #[must_use]
+    pub const fn remaining_image_bytes(&self) -> usize {
+        self.resource_limits
+            .image_bytes
+            .saturating_sub(self.resource_usage.image_bytes)
+    }
+
+    #[must_use]
+    pub const fn quota_metrics(&self) -> QuotaMetrics {
+        self.quota_metrics
+    }
+
+    pub fn record_quota_configuration_rejection(&mut self) {
+        self.quota_metrics.record_configuration();
+    }
+
+    pub fn record_quota_limit_rejection(&mut self, kind: QuotaKind) {
+        self.quota_metrics.record_limit(kind);
+    }
+
+    fn checked_resource_usage(
+        &mut self,
+        added: ResourceUsage,
+    ) -> Result<ResourceUsage, ModelError> {
+        let Some(next) = self.resource_usage.checked_add(added) else {
+            self.quota_metrics.record_limit(QuotaKind::Resources);
+            return Err(ModelError::Quota(QuotaKind::Resources));
+        };
+        if let Some(kind) = quota_exceeded(next, self.resource_limits) {
+            self.quota_metrics.record_limit(kind);
+            return Err(ModelError::Quota(kind));
+        }
+        Ok(next)
+    }
+
     pub fn submit_frame(
         &mut self,
         id: u64,
@@ -468,6 +1110,26 @@ impl Model {
         submitted_at_seconds: f64,
     ) -> Result<FrameSubmission, ModelError> {
         let bytes = frame.len();
+        let previous_bytes = {
+            let node = self.get(id)?;
+            let ResourceState::Window(window) = &node.state else {
+                return Err(ModelError::Kind(id));
+            };
+            window.frame.len()
+        };
+        let next_frame_bytes = self
+            .resource_usage
+            .frame_bytes
+            .checked_sub(previous_bytes)
+            .and_then(|current| current.checked_add(bytes));
+        let Some(next_frame_bytes) = next_frame_bytes else {
+            self.quota_metrics.record_limit(QuotaKind::FrameBytes);
+            return Err(ModelError::Quota(QuotaKind::FrameBytes));
+        };
+        if next_frame_bytes > self.resource_limits.frame_bytes {
+            self.quota_metrics.record_limit(QuotaKind::FrameBytes);
+            return Err(ModelError::Quota(QuotaKind::FrameBytes));
+        }
         let (generation, replaced_sequence) = {
             let node = self.get_mut(id)?;
             let ResourceState::Window(window) = &mut node.state else {
@@ -486,6 +1148,7 @@ impl Model {
             window.redraw_requested = true;
             (generation, replaced_sequence)
         };
+        self.resource_usage.frame_bytes = next_frame_bytes;
         self.frame_metrics.submitted = self.frame_metrics.submitted.saturating_add(1);
         self.frame_metrics.bytes_high_watermark =
             self.frame_metrics.bytes_high_watermark.max(bytes);
@@ -536,32 +1199,76 @@ impl Model {
         window_id: u64,
         tree: Option<crate::accessibility::SemanticTree>,
     ) -> Result<bool, AccessibilityModelError> {
-        let outcome: Result<_, AccessibilityModelError> = (|| {
-            let node = self.get_mut(window_id)?;
-            let ResourceState::Window(window) = &mut node.state else {
-                return Err(AccessibilityModelError::from(ModelError::Kind(window_id)));
+        let before: Result<_, AccessibilityModelError> = (|| {
+            let node = self.get(window_id)?;
+            let ResourceState::Window(window) = &node.state else {
+                return Err(ModelError::Kind(window_id).into());
             };
-            let before = (
+            Ok((
                 usize::from(window.accessibility.tree().is_some()),
                 window.accessibility.node_count(),
                 window.accessibility.text_bytes(),
-            );
-            let changed = window.accessibility.replace(tree)?;
-            let after = (
-                usize::from(window.accessibility.tree().is_some()),
-                window.accessibility.node_count(),
-                window.accessibility.text_bytes(),
-            );
-            Ok((changed, before, after))
+            ))
         })();
-        let (changed, before, after) = match outcome {
+        let before = match before {
             Ok(value) => value,
             Err(error) => {
                 self.record_accessibility_rejection();
                 return Err(error);
             }
         };
+        let after = (
+            usize::from(tree.is_some()),
+            tree.as_ref().map_or(0, |tree| tree.node_count()),
+            tree.as_ref().map_or(0, |tree| tree.text_bytes()),
+        );
+        let next_nodes = self
+            .resource_usage
+            .accessibility_nodes
+            .checked_sub(before.1)
+            .and_then(|current| current.checked_add(after.1));
+        let next_nodes = match next_nodes {
+            Some(value) if value <= self.resource_limits.accessibility_nodes => value,
+            _ => {
+                self.record_accessibility_rejection();
+                self.quota_metrics
+                    .record_limit(QuotaKind::AccessibilityNodes);
+                return Err(ModelError::Quota(QuotaKind::AccessibilityNodes).into());
+            }
+        };
+        let next_text_bytes = self
+            .resource_usage
+            .accessibility_text_bytes
+            .checked_sub(before.2)
+            .and_then(|current| current.checked_add(after.2));
+        let next_text_bytes = match next_text_bytes {
+            Some(value) if value <= self.resource_limits.accessibility_text_bytes => value,
+            _ => {
+                self.record_accessibility_rejection();
+                self.quota_metrics
+                    .record_limit(QuotaKind::AccessibilityTextBytes);
+                return Err(ModelError::Quota(QuotaKind::AccessibilityTextBytes).into());
+            }
+        };
+        let changed = {
+            let node = self
+                .get_mut(window_id)
+                .expect("validated accessibility window disappeared");
+            let ResourceState::Window(window) = &mut node.state else {
+                unreachable!("validated accessibility resource changed type")
+            };
+            window.accessibility.replace(tree)
+        };
+        let changed = match changed {
+            Ok(value) => value,
+            Err(error) => {
+                self.record_accessibility_rejection();
+                return Err(error.into());
+            }
+        };
         if changed {
+            self.resource_usage.accessibility_nodes = next_nodes;
+            self.resource_usage.accessibility_text_bytes = next_text_bytes;
             let metrics = &mut self.accessibility_metrics;
             metrics.current_trees = metrics
                 .current_trees
@@ -769,6 +1476,31 @@ impl Model {
     }
 }
 
+fn quota_exceeded(usage: ResourceUsage, limits: ResourceLimits) -> Option<QuotaKind> {
+    [
+        (usage.resources, limits.resources, QuotaKind::Resources),
+        (usage.windows, limits.windows, QuotaKind::Windows),
+        (usage.timers, limits.timers, QuotaKind::Timers),
+        (usage.images, limits.images, QuotaKind::Images),
+        (usage.fonts, limits.fonts, QuotaKind::Fonts),
+        (usage.image_bytes, limits.image_bytes, QuotaKind::ImageBytes),
+        (usage.font_bytes, limits.font_bytes, QuotaKind::FontBytes),
+        (usage.frame_bytes, limits.frame_bytes, QuotaKind::FrameBytes),
+        (
+            usage.accessibility_nodes,
+            limits.accessibility_nodes,
+            QuotaKind::AccessibilityNodes,
+        ),
+        (
+            usage.accessibility_text_bytes,
+            limits.accessibility_text_bytes,
+            QuotaKind::AccessibilityTextBytes,
+        ),
+    ]
+    .into_iter()
+    .find_map(|(value, limit, kind)| (value > limit).then_some(kind))
+}
+
 const fn allowed_parent(parent: ResourceKind, child: ResourceKind) -> bool {
     matches!(
         (parent, child),
@@ -788,10 +1520,7 @@ mod tests {
         model
             .create(
                 None,
-                ResourceState::Application {
-                    name: "测试".to_owned(),
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
             )
             .unwrap()
     }
@@ -857,6 +1586,352 @@ mod tests {
     }
 
     #[test]
+    fn enforces_resource_count_quotas_before_allocating_ids() {
+        let limits = ResourceLimits {
+            resources: 3,
+            windows: 1,
+            timers: 2,
+            images: 0,
+            fonts: 0,
+            image_bytes: 0,
+            font_bytes: 0,
+            frame_bytes: 0,
+            accessibility_nodes: 0,
+            accessibility_text_bytes: 0,
+        };
+        let mut model = Model::with_limits(limits);
+        let application = app(&mut model);
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        assert_eq!(
+            model.create(Some(application), ResourceState::Window(Box::default())),
+            Err(ModelError::Quota(QuotaKind::Windows))
+        );
+        let timer = model
+            .create(
+                Some(application),
+                ResourceState::Timer(TimerState {
+                    interval: Duration::from_millis(10),
+                    repeating: false,
+                    next_deadline: Instant::now(),
+                    cancelled: false,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            model.create(
+                Some(application),
+                ResourceState::Timer(TimerState {
+                    interval: Duration::from_millis(10),
+                    repeating: false,
+                    next_deadline: Instant::now(),
+                    cancelled: false,
+                }),
+            ),
+            Err(ModelError::Quota(QuotaKind::Resources))
+        );
+        assert_eq!(
+            model.resource_usage(),
+            ResourceUsage {
+                resources: 3,
+                windows: 1,
+                timers: 1,
+                ..ResourceUsage::default()
+            }
+        );
+        assert_eq!(
+            model.quota_metrics(),
+            QuotaMetrics {
+                rejected: 2,
+                limit_rejected: 2,
+                resources: 1,
+                windows: 1,
+                ..QuotaMetrics::default()
+            }
+        );
+
+        model.close(window).unwrap();
+        let replacement = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        assert_eq!(replacement, timer + 1);
+        model.close(application).unwrap();
+        assert_eq!(model.resource_usage(), ResourceUsage::default());
+    }
+
+    #[test]
+    fn initial_event_failure_rolls_back_resource_creation() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        model.events = EventBatcher::with_capacity(1);
+
+        assert_eq!(
+            model.create_with_events(
+                Some(application),
+                ResourceState::Window(Box::default()),
+                |id| vec![
+                    PlatformEvent::new(EventKind::WindowShown, Some(id), 1.0),
+                    PlatformEvent::new(EventKind::RedrawRequested, Some(id), 1.0),
+                ],
+            ),
+            Err(ResourceCreationError::Queue(EventQueueError::Full))
+        );
+        assert_eq!(model.count(ResourceKind::Window), 0);
+        assert_eq!(
+            model.resource_usage(),
+            ResourceUsage {
+                resources: 1,
+                ..ResourceUsage::default()
+            }
+        );
+        assert_eq!(
+            model.resource_metrics(),
+            ResourceMetrics {
+                live: 1,
+                high_watermark: 1,
+                created: 1,
+                closed: 0,
+            }
+        );
+        assert!(!model.resource_limits_locked());
+        assert!(model.get(application).unwrap().children.is_empty());
+        assert_eq!(model.events.metrics().queued, 0);
+        assert_eq!(model.events.metrics().accepted, 0);
+        assert_eq!(model.events.metrics().rejected, 1);
+
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        assert_eq!(window, application + 1);
+    }
+
+    #[test]
+    fn configures_lower_quotas_until_the_first_child_is_created() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        let limits = ResourceLimits {
+            resources: 2,
+            windows: 1,
+            timers: 0,
+            images: 0,
+            fonts: 0,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(model.configure_resource_limits(limits), Ok(limits));
+        assert_eq!(model.resource_limits(), limits);
+        assert!(!model.resource_limits_locked());
+
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        assert!(model.resource_limits_locked());
+        model.close(window).unwrap();
+        assert_eq!(
+            model.configure_resource_limits(ResourceLimits::default()),
+            Err(ModelError::QuotaLocked)
+        );
+        assert_eq!(
+            model.quota_metrics(),
+            QuotaMetrics {
+                rejected: 1,
+                locked_rejected: 1,
+                ..QuotaMetrics::default()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_running_application_quota_configuration() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        let limits = ResourceLimits {
+            resources: 0,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(
+            model.configure_resource_limits(limits),
+            Err(ModelError::QuotaConfiguration(QuotaKind::Resources))
+        );
+        let limits = ResourceLimits {
+            windows: MAX_APPLICATION_WINDOWS + 1,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(
+            model.configure_resource_limits(limits),
+            Err(ModelError::QuotaConfiguration(QuotaKind::Windows))
+        );
+
+        model.begin_application_run(application).unwrap();
+        assert_eq!(
+            model.configure_resource_limits(ResourceLimits::default()),
+            Err(ModelError::QuotaLocked)
+        );
+        model.finish_application_run(application, None);
+        model.lock_resource_limits();
+        assert_eq!(
+            model.configure_resource_limits(ResourceLimits::default()),
+            Err(ModelError::QuotaLocked)
+        );
+        assert_eq!(
+            model.quota_metrics(),
+            QuotaMetrics {
+                rejected: 4,
+                configuration_rejected: 2,
+                locked_rejected: 2,
+                ..QuotaMetrics::default()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_each_resource_kind_at_its_application_quota() {
+        let limits = ResourceLimits {
+            resources: 8,
+            windows: 0,
+            timers: 0,
+            images: 0,
+            fonts: 0,
+            image_bytes: 16,
+            font_bytes: 16,
+            frame_bytes: 16,
+            accessibility_nodes: 16,
+            accessibility_text_bytes: 16,
+        };
+        let mut model = Model::with_limits(limits);
+        let application = app(&mut model);
+        let cases = [
+            (ResourceState::Window(Box::default()), QuotaKind::Windows),
+            (
+                ResourceState::Timer(TimerState {
+                    interval: Duration::from_millis(10),
+                    repeating: false,
+                    next_deadline: Instant::now(),
+                    cancelled: false,
+                }),
+                QuotaKind::Timers,
+            ),
+            (
+                ResourceState::Image {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 4],
+                },
+                QuotaKind::Images,
+            ),
+            (
+                ResourceState::Font {
+                    family: "测试".to_owned(),
+                    bytes: Some(vec![0; 4]),
+                },
+                QuotaKind::Fonts,
+            ),
+        ];
+        for (state, quota) in cases {
+            assert_eq!(
+                model.create(Some(application), state),
+                Err(ModelError::Quota(quota))
+            );
+            assert!(quota.code().starts_with("PLATFORM_QUOTA_"));
+        }
+        assert_eq!(
+            model.resource_usage(),
+            ResourceUsage {
+                resources: 1,
+                ..ResourceUsage::default()
+            }
+        );
+        assert_eq!(
+            model.quota_metrics(),
+            QuotaMetrics {
+                rejected: 4,
+                limit_rejected: 4,
+                windows: 1,
+                timers: 1,
+                images: 1,
+                fonts: 1,
+                ..QuotaMetrics::default()
+            }
+        );
+    }
+
+    #[test]
+    fn releases_owned_image_and_font_byte_quotas_on_close() {
+        let limits = ResourceLimits {
+            resources: 8,
+            windows: 0,
+            timers: 0,
+            images: 2,
+            fonts: 2,
+            image_bytes: 4,
+            font_bytes: 3,
+            frame_bytes: 0,
+            accessibility_nodes: 0,
+            accessibility_text_bytes: 0,
+        };
+        let mut model = Model::with_limits(limits);
+        let application = app(&mut model);
+        let image = model
+            .create(
+                Some(application),
+                ResourceState::Image {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 4],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            model.create(
+                Some(application),
+                ResourceState::Image {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 1],
+                },
+            ),
+            Err(ModelError::Quota(QuotaKind::ImageBytes))
+        );
+        model.close(image).unwrap();
+        model
+            .create(
+                Some(application),
+                ResourceState::Image {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 1],
+                },
+            )
+            .unwrap();
+
+        let font = model
+            .create(
+                Some(application),
+                ResourceState::Font {
+                    family: "测试".to_owned(),
+                    bytes: Some(vec![0; 3]),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            model.create(
+                Some(application),
+                ResourceState::Font {
+                    family: "测试二".to_owned(),
+                    bytes: Some(vec![0; 1]),
+                },
+            ),
+            Err(ModelError::Quota(QuotaKind::FontBytes))
+        );
+        model.close(font).unwrap();
+        assert_eq!(model.resource_usage().font_bytes, 0);
+        assert_eq!(model.quota_metrics().image_bytes, 1);
+        assert_eq!(model.quota_metrics().font_bytes, 1);
+        model.close(application).unwrap();
+        assert_eq!(model.resource_usage(), ResourceUsage::default());
+    }
+
+    #[test]
     fn closing_is_explicitly_idempotent_at_resource_wrapper_boundary() {
         let mut model = Model::default();
         let application = app(&mut model);
@@ -872,6 +1947,228 @@ mod tests {
                 high_watermark: 1,
                 created: 1,
                 closed: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn application_lifecycle_is_monotonic_and_exit_is_idempotent() {
+        let mut model = Model::default();
+        assert_eq!(
+            model.application_lifecycle_summary(),
+            ApplicationLifecycle::Closed
+        );
+        let application = app(&mut model);
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::Ready
+        );
+        assert!(!model.event_loop_active());
+
+        model.begin_application_run(application).unwrap();
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::Running
+        );
+        assert!(model.event_loop_active());
+        assert!(model.resource_limits_locked());
+        assert_eq!(
+            model.begin_application_run(application),
+            Err(ModelError::ApplicationRunning)
+        );
+
+        assert_eq!(model.request_application_exit(application), Ok(true));
+        assert_eq!(model.request_application_exit(application), Ok(false));
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::ExitRequested
+        );
+        assert!(model.event_loop_active());
+
+        model.finish_application_run(application, Some("PLATFORM_PRESENT"));
+        model.finish_application_run(application, None);
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::Exited
+        );
+        assert!(!model.event_loop_active());
+        assert_eq!(model.application_exit_error(), Some("PLATFORM_PRESENT"));
+        assert_eq!(model.request_application_exit(application), Ok(false));
+        assert_eq!(
+            model.begin_application_run(application),
+            Err(ModelError::ApplicationExited)
+        );
+
+        model.close(application).unwrap();
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::Closed
+        );
+        assert_eq!(
+            model.application_lifecycle_summary(),
+            ApplicationLifecycle::Closed
+        );
+        assert_eq!(model.application_exit_error(), None);
+        assert_eq!(
+            model.application_metrics(),
+            ApplicationLifecycleMetrics {
+                runs_started: 1,
+                exit_requests: 1,
+                duplicate_exit_requests: 2,
+                exits: 1,
+                failed_exits: 1,
+                closes: 1,
+                resources_reclaimed: 1,
+                zeroed_closes: 1,
+                ..ApplicationLifecycleMetrics::default()
+            }
+        );
+    }
+
+    #[test]
+    fn pre_run_exit_request_does_not_freeze_quotas_until_run_begins() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        assert_eq!(model.request_application_exit(application), Ok(true));
+        assert!(!model.resource_limits_locked());
+        let limits = ResourceLimits {
+            windows: 1,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(model.configure_resource_limits(limits), Ok(limits));
+
+        model.begin_application_run(application).unwrap();
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::ExitRequested
+        );
+        assert!(model.event_loop_active());
+        assert!(model.resource_limits_locked());
+        model.finish_application_run(application, None);
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::Exited
+        );
+    }
+
+    #[test]
+    fn repeated_shutdown_reclaims_all_resources_and_usage() {
+        const CYCLES: usize = 128;
+        const RESOURCES_PER_CYCLE: usize = 15;
+        let tree = SemanticTree::validate(&Data::map([
+            ("编号", Data::Integer(1)),
+            ("角色", Data::String("文字".to_owned())),
+            ("名称", Data::String("压力节点".to_owned())),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+            ),
+        ]))
+        .unwrap();
+        let mut model = Model::default();
+
+        for cycle in 0..CYCLES {
+            let application = app(&mut model);
+            for index in 0..4 {
+                let window = model
+                    .create(Some(application), ResourceState::Window(Box::default()))
+                    .unwrap();
+                model
+                    .submit_frame(window, vec![u8::try_from(index).unwrap(); 256], 1.0)
+                    .unwrap();
+                model
+                    .replace_accessibility(window, Some(tree.clone()))
+                    .unwrap();
+            }
+            for index in 0..4 {
+                model
+                    .create(
+                        Some(application),
+                        ResourceState::Timer(TimerState {
+                            interval: Duration::from_millis(10),
+                            repeating: index % 2 == 0,
+                            next_deadline: Instant::now() + Duration::from_millis(10),
+                            cancelled: false,
+                        }),
+                    )
+                    .unwrap();
+            }
+            for index in 0..4 {
+                model
+                    .create(
+                        Some(application),
+                        ResourceState::Image {
+                            width: 4,
+                            height: 4,
+                            rgba: vec![u8::try_from(index).unwrap(); 64],
+                        },
+                    )
+                    .unwrap();
+            }
+            for index in 0..2 {
+                model
+                    .create(
+                        Some(application),
+                        ResourceState::Font {
+                            family: format!("压力字体{index}"),
+                            bytes: Some(vec![u8::try_from(index).unwrap(); 64]),
+                        },
+                    )
+                    .unwrap();
+            }
+            assert_eq!(model.resource_metrics().live, RESOURCES_PER_CYCLE);
+            assert_eq!(model.resource_usage().frame_bytes, 4 * 256);
+            assert_eq!(model.resource_usage().image_bytes, 4 * 64);
+            assert_eq!(model.resource_usage().font_bytes, 2 * 64);
+            assert_eq!(model.resource_usage().accessibility_nodes, 4);
+
+            model.begin_application_run(application).unwrap();
+            assert_eq!(model.request_application_exit(application), Ok(true));
+            assert_eq!(model.request_application_exit(application), Ok(false));
+            model.finish_application_run(application, None);
+            assert_eq!(model.close(application).unwrap().len(), RESOURCES_PER_CYCLE);
+            assert_eq!(
+                model.close(application),
+                Err(ModelError::Missing(application))
+            );
+            assert_eq!(model.resource_usage(), ResourceUsage::default());
+            assert_eq!(model.resource_metrics().live, 0);
+            assert_eq!(model.frame_metrics().pending, 0);
+            assert_eq!(model.accessibility_metrics().current_trees, 0);
+            assert_eq!(model.accessibility_metrics().current_nodes, 0);
+            assert_eq!(model.accessibility_metrics().current_text_bytes, 0);
+            assert_eq!(
+                model.application_lifecycle_summary(),
+                ApplicationLifecycle::Closed
+            );
+            assert_eq!(
+                model.application_metrics().closes,
+                u64::try_from(cycle + 1).unwrap()
+            );
+        }
+
+        let total_resources = u64::try_from(CYCLES * RESOURCES_PER_CYCLE).unwrap();
+        assert_eq!(
+            model.resource_metrics(),
+            ResourceMetrics {
+                live: 0,
+                high_watermark: RESOURCES_PER_CYCLE,
+                created: total_resources,
+                closed: total_resources,
+            }
+        );
+        assert_eq!(
+            model.application_metrics(),
+            ApplicationLifecycleMetrics {
+                runs_started: u64::try_from(CYCLES).unwrap(),
+                exit_requests: u64::try_from(CYCLES).unwrap(),
+                duplicate_exit_requests: u64::try_from(CYCLES).unwrap(),
+                exits: u64::try_from(CYCLES).unwrap(),
+                normal_exits: u64::try_from(CYCLES).unwrap(),
+                closes: u64::try_from(CYCLES).unwrap(),
+                resources_reclaimed: total_resources,
+                zeroed_closes: u64::try_from(CYCLES).unwrap(),
+                ..ApplicationLifecycleMetrics::default()
             }
         );
     }
@@ -973,6 +2270,66 @@ mod tests {
     }
 
     #[test]
+    fn bounds_total_retained_frame_bytes_and_preserves_the_previous_frame() {
+        let limits = ResourceLimits {
+            resources: 4,
+            windows: 2,
+            timers: 0,
+            images: 0,
+            fonts: 0,
+            image_bytes: 0,
+            font_bytes: 0,
+            frame_bytes: 5,
+            accessibility_nodes: 0,
+            accessibility_text_bytes: 0,
+        };
+        let mut model = Model::with_limits(limits);
+        let application = app(&mut model);
+        let first_window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let second_window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+
+        model
+            .submit_frame(first_window, vec![1, 2, 3, 4], 1.0)
+            .unwrap();
+        assert_eq!(model.resource_usage().frame_bytes, 4);
+        assert_eq!(
+            model.submit_frame(second_window, vec![5, 6], 1.1),
+            Err(ModelError::Quota(QuotaKind::FrameBytes))
+        );
+        let ResourceState::Window(second) = &model.get(second_window).unwrap().state else {
+            panic!("window state expected")
+        };
+        assert!(second.frame.is_empty());
+
+        let replacement = model
+            .submit_frame(first_window, vec![7, 8, 9, 10, 11], 1.2)
+            .unwrap();
+        assert_eq!(replacement.sequence, 2);
+        assert_eq!(model.resource_usage().frame_bytes, 5);
+        assert_eq!(
+            model.submit_frame(first_window, vec![0; 6], 1.3),
+            Err(ModelError::Quota(QuotaKind::FrameBytes))
+        );
+        let ResourceState::Window(first) = &model.get(first_window).unwrap().state else {
+            panic!("window state expected")
+        };
+        assert_eq!(first.frame, vec![7, 8, 9, 10, 11]);
+        assert_eq!(first.frame_generation, 2);
+        assert_eq!(model.frame_metrics().submitted, 2);
+        assert_eq!(model.quota_metrics().frame_bytes, 2);
+
+        model.close(first_window).unwrap();
+        assert_eq!(model.resource_usage().frame_bytes, 0);
+        model.submit_frame(second_window, vec![12; 5], 1.4).unwrap();
+        model.close(application).unwrap();
+        assert_eq!(model.resource_usage(), ResourceUsage::default());
+    }
+
+    #[test]
     fn queues_validated_accessibility_focus_requests_without_mutating_focus() {
         let mut model = Model::default();
         let application = app(&mut model);
@@ -997,12 +2354,8 @@ mod tests {
                 Data::Array(vec![0.into(), 0.into(), 80.into(), 30.into()]),
             ),
         ]);
-        let ResourceState::Window(state) = &mut model.get_mut(window).unwrap().state else {
-            panic!("window state expected")
-        };
-        state
-            .accessibility
-            .replace(Some(SemanticTree::validate(&tree).unwrap()))
+        model
+            .replace_accessibility(window, Some(SemanticTree::validate(&tree).unwrap()))
             .unwrap();
         model
             .request_accessibility_focus(window, 1, AccessibilitySource::AssistiveTechnology, 2.5)
@@ -1072,12 +2425,8 @@ mod tests {
                 Data::Array(vec![0.into(), 0.into(), 80.into(), 30.into()]),
             ),
         ]);
-        let ResourceState::Window(state) = &mut model.get_mut(window).unwrap().state else {
-            panic!("window state expected")
-        };
-        state
-            .accessibility
-            .replace(Some(SemanticTree::validate(&tree).unwrap()))
+        model
+            .replace_accessibility(window, Some(SemanticTree::validate(&tree).unwrap()))
             .unwrap();
         model
             .request_accessibility_action(
@@ -1182,10 +2531,17 @@ mod tests {
         assert_eq!(metrics.text_bytes_high_watermark, "根内容".len());
         assert_eq!(metrics.updates, 1);
         assert_eq!(metrics.unchanged, 1);
+        assert_eq!(model.resource_usage().accessibility_nodes, 2);
+        assert_eq!(
+            model.resource_usage().accessibility_text_bytes,
+            "根内容".len()
+        );
 
         assert!(model.replace_accessibility(window, None).unwrap());
         assert_eq!(model.accessibility_metrics().current_trees, 0);
         assert_eq!(model.accessibility_metrics().cleared, 1);
+        assert_eq!(model.resource_usage().accessibility_nodes, 0);
+        assert_eq!(model.resource_usage().accessibility_text_bytes, 0);
         assert!(
             model
                 .replace_accessibility(window, Some(SemanticTree::validate(&tree).unwrap()))
@@ -1198,6 +2554,110 @@ mod tests {
         assert_eq!(metrics.current_text_bytes, 0);
         assert_eq!(metrics.nodes_high_watermark, 2);
         assert_eq!(metrics.updates, 3);
+        assert_eq!(model.resource_usage().accessibility_nodes, 0);
+        assert_eq!(model.resource_usage().accessibility_text_bytes, 0);
+    }
+
+    #[test]
+    fn bounds_accessibility_nodes_and_text_across_application_windows() {
+        let limits = ResourceLimits {
+            resources: 3,
+            windows: 2,
+            timers: 0,
+            images: 0,
+            fonts: 0,
+            image_bytes: 0,
+            font_bytes: 0,
+            frame_bytes: 0,
+            accessibility_nodes: 2,
+            accessibility_text_bytes: 5,
+        };
+        let mut model = Model::with_limits(limits);
+        let application = app(&mut model);
+        let first_window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let second_window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let single = |id, name: &str| {
+            SemanticTree::validate(&Data::map([
+                ("编号", Data::Integer(id)),
+                ("角色", Data::String("文字".to_owned())),
+                ("名称", Data::String(name.to_owned())),
+                (
+                    "边界",
+                    Data::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                ),
+            ]))
+            .unwrap()
+        };
+        let double = SemanticTree::validate(&Data::map([
+            ("编号", Data::Integer(10)),
+            ("角色", Data::String("面板".to_owned())),
+            ("名称", Data::String(String::new())),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+            ),
+            (
+                "子",
+                Data::Array(vec![Data::map([
+                    ("编号", Data::Integer(11)),
+                    ("角色", Data::String("文字".to_owned())),
+                    ("名称", Data::String(String::new())),
+                    (
+                        "边界",
+                        Data::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                    ),
+                ])]),
+            ),
+        ]))
+        .unwrap();
+
+        model
+            .replace_accessibility(first_window, Some(single(1, "甲")))
+            .unwrap();
+        assert_eq!(model.resource_usage().accessibility_nodes, 1);
+        assert_eq!(model.resource_usage().accessibility_text_bytes, 3);
+        assert_eq!(
+            model
+                .replace_accessibility(second_window, Some(single(2, "乙")))
+                .unwrap_err()
+                .code(),
+            "PLATFORM_QUOTA_ACCESSIBILITY_TEXT_BYTES"
+        );
+        assert_eq!(
+            model
+                .replace_accessibility(second_window, Some(double.clone()))
+                .unwrap_err()
+                .code(),
+            "PLATFORM_QUOTA_ACCESSIBILITY_NODES"
+        );
+        let ResourceState::Window(second) = &model.get(second_window).unwrap().state else {
+            panic!("window state expected")
+        };
+        assert_eq!(second.accessibility.revision(), 0);
+        assert!(second.accessibility.tree().is_none());
+        assert_eq!(model.accessibility_metrics().rejected, 2);
+        assert_eq!(model.quota_metrics().accessibility_nodes, 1);
+        assert_eq!(model.quota_metrics().accessibility_text_bytes, 1);
+        assert_eq!(model.quota_metrics().limit_rejected, 2);
+        assert_eq!(model.resource_usage().accessibility_nodes, 1);
+        assert_eq!(model.resource_usage().accessibility_text_bytes, 3);
+
+        model
+            .replace_accessibility(first_window, Some(double))
+            .unwrap();
+        assert_eq!(model.resource_usage().accessibility_nodes, 2);
+        assert_eq!(model.resource_usage().accessibility_text_bytes, 0);
+        model.close(first_window).unwrap();
+        assert_eq!(model.resource_usage().accessibility_nodes, 0);
+        model
+            .replace_accessibility(second_window, Some(single(2, "乙")))
+            .unwrap();
+        model.close(application).unwrap();
+        assert_eq!(model.resource_usage(), ResourceUsage::default());
     }
 
     #[test]

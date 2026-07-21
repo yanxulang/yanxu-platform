@@ -9,7 +9,11 @@ use crate::accessibility::{
 use crate::bridge::{encode_data, free_value};
 use crate::data::Data;
 use crate::event::{EVENT_MAJOR, EVENT_MINOR, EventKind, PlatformEvent};
-use crate::model::{FrameSubmission, Model, ResourceKind, ResourceState, TimerState, WindowState};
+use crate::model::{
+    ApplicationState, FrameSubmission, Model, ModelError, QuotaKind, QuotaMetrics,
+    ResourceCreationError, ResourceKind, ResourceLimits, ResourceState, ResourceUsage, TimerState,
+    WindowState,
+};
 use crate::protocol;
 use crate::sync::{RecoverMutex, recovered_lock_count};
 use crate::text::{TextError, TextLayout, TextOptions, TextService};
@@ -28,7 +32,7 @@ const TYPE_FONT: &[u8] = b"yanxu.platform.font";
 const TYPE_TIMER: &[u8] = b"yanxu.platform.timer";
 const TYPE_IMAGE: &[u8] = b"yanxu.platform.image";
 const PLATFORM_MAJOR: i64 = 1;
-const PLATFORM_MINOR: i64 = 6;
+const PLATFORM_MINOR: i64 = 7;
 const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPBOARD_IMAGE_DIMENSION: usize = 16_384;
 const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -201,6 +205,8 @@ pub enum Operation {
     SubmitFrameFeedback,
     AccessibilityUpdate,
     AccessibilityQuery,
+    ResourceLimitsQuery,
+    ResourceLimitsConfigure,
 }
 
 impl Operation {
@@ -246,6 +252,8 @@ impl Operation {
             37 => Self::SubmitFrameFeedback,
             38 => Self::AccessibilityUpdate,
             39 => Self::AccessibilityQuery,
+            40 => Self::ResourceLimitsQuery,
+            41 => Self::ResourceLimitsConfigure,
             _ => return None,
         })
     }
@@ -285,15 +293,12 @@ pub unsafe fn call(
             let text_service = Arc::new(Mutex::new(TextService::new()));
             let id = match model.lock_recover().create(
                 None,
-                ResourceState::Application {
-                    name,
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new(name)),
             ) {
                 Ok(id) => id,
-                Err(_) => {
+                Err(error) => {
                     host.release(callback);
-                    return Err("PLATFORM_RESOURCE_LIMIT");
+                    return Err(model_error_code(error));
                 }
             };
             model
@@ -324,30 +329,30 @@ pub unsafe fn call(
             let mut window = WindowState::default();
             apply_window_config(&mut window, config)?;
             let mut model = application.model.lock_recover();
+            let visible = window.visible;
+            let created_at = monotonic_seconds();
             let id = model
-                .create(
+                .create_with_events(
                     Some(application.id),
-                    ResourceState::Window(Box::new(window.clone())),
+                    ResourceState::Window(Box::new(window)),
+                    |id| {
+                        let mut events = Vec::with_capacity(2);
+                        if visible {
+                            events.push(PlatformEvent::new(
+                                EventKind::WindowShown,
+                                Some(id),
+                                created_at,
+                            ));
+                        }
+                        events.push(PlatformEvent::new(
+                            EventKind::RedrawRequested,
+                            Some(id),
+                            created_at,
+                        ));
+                        events
+                    },
                 )
-                .map_err(|_| "PLATFORM_RESOURCE_LIMIT")?;
-            if window.visible {
-                model
-                    .events
-                    .push(PlatformEvent::new(
-                        EventKind::WindowShown,
-                        Some(id),
-                        monotonic_seconds(),
-                    ))
-                    .map_err(|_| "PLATFORM_QUEUE_FULL")?;
-            }
-            model
-                .events
-                .push(PlatformEvent::new(
-                    EventKind::RedrawRequested,
-                    Some(id),
-                    monotonic_seconds(),
-                ))
-                .map_err(|_| "PLATFORM_QUEUE_FULL")?;
+                .map_err(resource_creation_error_code)?;
             drop(model);
             Ok(resource_output(
                 application.model.clone(),
@@ -484,6 +489,22 @@ pub unsafe fn call(
             let model = application.model.lock_recover();
             Ok(Output::Value(debug_snapshot(&model)))
         }
+        Operation::ResourceLimitsQuery => {
+            require_count(arguments, 1)?;
+            let (_, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let model = application.model.lock_recover();
+            Ok(Output::Value(resource_limits_data(model.resource_limits())))
+        }
+        Operation::ResourceLimitsConfigure => {
+            require_count(arguments, 2)?;
+            let (_, application) =
+                unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
+            let config = map(&arguments[1])?;
+            let mut model = application.model.lock_recover();
+            let limits = configure_resource_limits_from_data(&mut model, config)?;
+            Ok(Output::Value(resource_limits_data(limits)))
+        }
         Operation::FontFamilies => {
             require_count(arguments, 1)?;
             let (_, application) =
@@ -533,23 +554,11 @@ pub unsafe fn call(
             let (parent_handle, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
             let font_bytes = bytes(&arguments[1])?.to_vec();
-            let families = application
-                .text
-                .lock_recover()
-                .load_font(font_bytes.clone())
-                .map_err(text_error_code)?;
-            let family = families.first().cloned().ok_or("PLATFORM_FONT_INVALID")?;
-            let id = application
-                .model
-                .lock_recover()
-                .create(
-                    Some(application.id),
-                    ResourceState::Font {
-                        family,
-                        bytes: Some(font_bytes),
-                    },
-                )
-                .map_err(|_| "PLATFORM_RESOURCE_LIMIT")?;
+            let mut model = application.model.lock_recover();
+            let id = create_loaded_font(&mut model, application.id, font_bytes, |font_bytes| {
+                application.text.lock_recover().load_font(font_bytes)
+            })?;
+            drop(model);
             Ok(resource_output(
                 application.model.clone(),
                 application.text.clone(),
@@ -632,7 +641,7 @@ pub unsafe fn call(
                         cancelled: false,
                     }),
                 )
-                .map_err(|_| "PLATFORM_RESOURCE_LIMIT")?;
+                .map_err(model_error_code)?;
             Ok(resource_output(
                 application.model.clone(),
                 application.text.clone(),
@@ -728,19 +737,10 @@ pub unsafe fn call(
             require_count(arguments, 2)?;
             let (parent_handle, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
-            let (width, height, rgba) = decode_image(bytes(&arguments[1])?)?;
-            let id = application
-                .model
-                .lock_recover()
-                .create(
-                    Some(application.id),
-                    ResourceState::Image {
-                        width,
-                        height,
-                        rgba,
-                    },
-                )
-                .map_err(|_| "PLATFORM_RESOURCE_LIMIT")?;
+            let source = bytes(&arguments[1])?;
+            let mut model = application.model.lock_recover();
+            let id = create_loaded_image(&mut model, application.id, source, decode_image)?;
+            drop(model);
             Ok(resource_output(
                 application.model.clone(),
                 application.text.clone(),
@@ -877,16 +877,14 @@ pub unsafe fn call(
             let (_, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
             let mut model = application.model.lock_recover();
-            let node = model
-                .get_mut(application.id)
-                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
-            let ResourceState::Application { exit_requested, .. } = &mut node.state else {
-                return Err("PLATFORM_RESOURCE_TYPE");
-            };
-            *exit_requested = true;
+            let changed = model
+                .request_application_exit(application.id)
+                .map_err(model_error_code)?;
             drop(model);
-            let _ = crate::windowing::wake(host.0.event_loop_id);
-            host.wake();
+            if changed {
+                let _ = crate::windowing::wake(host.0.event_loop_id);
+                host.wake();
+            }
             Ok(Output::Value(Data::Nil))
         }
         Operation::Wake => {
@@ -950,7 +948,7 @@ fn submit_frame(
         .model
         .lock_recover()
         .submit_frame(resource.id, bytes.to_vec(), submitted_at_seconds)
-        .map_err(frame_model_error)?;
+        .map_err(model_error_code)?;
     let _ = crate::windowing::wake(resource.host.0.event_loop_id);
     resource.host.wake();
     Ok((count, submission))
@@ -1019,6 +1017,20 @@ fn capabilities() -> Data {
         ("复杂文字", Data::Bool(true)),
         ("状态故障恢复", Data::Bool(true)),
         ("运行可观测性", Data::Bool(true)),
+        ("应用资源配额", Data::Bool(true)),
+        ("应用资源配额可下调", Data::Bool(true)),
+        ("应用资源配额拒绝统计", Data::Bool(true)),
+        (
+            "应用生命周期状态",
+            string_list(&["就绪", "运行中", "退出请求", "已退出", "已关闭"]),
+        ),
+        ("应用退出幂等", Data::Bool(true)),
+        ("应用生命周期统计", Data::Bool(true)),
+        ("应用关闭资源归零", Data::Bool(true)),
+        (
+            "应用资源硬上限",
+            resource_limits_data(ResourceLimits::default()),
+        ),
         ("待呈现帧上限", Data::Integer(1)),
         ("帧提交反馈", Data::Bool(true)),
         ("帧呈现反馈", Data::Bool(true)),
@@ -1096,7 +1108,7 @@ fn window_command(
     value: &Data,
 ) -> Result<(), &'static str> {
     let mut model = resource.model.lock_recover();
-    let running = model.running;
+    let running = model.event_loop_active();
     let node = model
         .get_mut(resource.id)
         .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
@@ -1235,6 +1247,10 @@ fn window_snapshot(resource: &PlatformResource) -> Result<Data, &'static str> {
 fn debug_snapshot(model: &Model) -> Data {
     let events = model.events.metrics();
     let resources = model.resource_metrics();
+    let application_metrics = model.application_metrics();
+    let resource_limits = model.resource_limits();
+    let resource_usage = model.resource_usage();
+    let quota_metrics = model.quota_metrics();
     let frames = model.frame_metrics();
     let accessibility = model.accessibility_metrics();
     Data::map([
@@ -1244,7 +1260,17 @@ fn debug_snapshot(model: &Model) -> Data {
         ("图片", usize_data(model.count(ResourceKind::Image))),
         ("字体", usize_data(model.count(ResourceKind::Font))),
         ("待处理事件", usize_data(events.queued)),
-        ("运行中", Data::Bool(model.running)),
+        (
+            "应用状态",
+            Data::String(model.application_lifecycle_summary().name().to_owned()),
+        ),
+        ("运行中", Data::Bool(model.event_loop_active())),
+        (
+            "退出错误",
+            model
+                .application_exit_error()
+                .map_or(Data::Nil, |error| Data::String(error.to_owned())),
+        ),
         ("状态恢复次数", u64_data(recovered_lock_count())),
         (
             "事件队列",
@@ -1260,12 +1286,41 @@ fn debug_snapshot(model: &Model) -> Data {
             ]),
         ),
         (
+            "应用生命周期统计",
+            Data::map([
+                ("运行开始总数", u64_data(application_metrics.runs_started)),
+                ("退出请求总数", u64_data(application_metrics.exit_requests)),
+                (
+                    "重复退出总数",
+                    u64_data(application_metrics.duplicate_exit_requests),
+                ),
+                ("退出完成总数", u64_data(application_metrics.exits)),
+                ("正常退出总数", u64_data(application_metrics.normal_exits)),
+                ("失败退出总数", u64_data(application_metrics.failed_exits)),
+                ("应用关闭总数", u64_data(application_metrics.closes)),
+                (
+                    "回收资源总数",
+                    u64_data(application_metrics.resources_reclaimed),
+                ),
+                ("资源归零总数", u64_data(application_metrics.zeroed_closes)),
+            ]),
+        ),
+        (
             "资源统计",
             Data::map([
                 ("当前", usize_data(resources.live)),
                 ("高水位", usize_data(resources.high_watermark)),
                 ("创建总数", u64_data(resources.created)),
                 ("关闭总数", u64_data(resources.closed)),
+            ]),
+        ),
+        (
+            "资源配额",
+            Data::map([
+                ("已冻结", Data::Bool(model.resource_limits_locked())),
+                ("上限", resource_limits_data(resource_limits)),
+                ("使用", resource_usage_data(resource_usage)),
+                ("拒绝统计", quota_metrics_data(quota_metrics)),
             ]),
         ),
         (
@@ -1317,6 +1372,205 @@ fn debug_snapshot(model: &Model) -> Data {
                 ("原生树同步总数", u64_data(accessibility.native_tree_syncs)),
                 ("原生请求总数", u64_data(accessibility.native_requests)),
                 ("原生拒绝总数", u64_data(accessibility.native_rejected)),
+            ]),
+        ),
+    ])
+}
+
+const RESOURCE_LIMIT_FIELDS: [&str; 10] = [
+    "资源总数",
+    "窗口数",
+    "计时器数",
+    "图片数",
+    "字体数",
+    "图片字节",
+    "字体字节",
+    "帧字节",
+    "无障碍节点",
+    "无障碍文字字节",
+];
+
+fn parse_resource_limits(
+    config: &BTreeMap<String, Data>,
+    current: ResourceLimits,
+) -> Result<ResourceLimits, &'static str> {
+    if config
+        .keys()
+        .any(|name| !RESOURCE_LIMIT_FIELDS.contains(&name.as_str()))
+    {
+        return Err("PLATFORM_QUOTA_CONFIG");
+    }
+    ResourceLimits {
+        resources: configured_limit(config, "资源总数", current.resources)?,
+        windows: configured_limit(config, "窗口数", current.windows)?,
+        timers: configured_limit(config, "计时器数", current.timers)?,
+        images: configured_limit(config, "图片数", current.images)?,
+        fonts: configured_limit(config, "字体数", current.fonts)?,
+        image_bytes: configured_limit(config, "图片字节", current.image_bytes)?,
+        font_bytes: configured_limit(config, "字体字节", current.font_bytes)?,
+        frame_bytes: configured_limit(config, "帧字节", current.frame_bytes)?,
+        accessibility_nodes: configured_limit(config, "无障碍节点", current.accessibility_nodes)?,
+        accessibility_text_bytes: configured_limit(
+            config,
+            "无障碍文字字节",
+            current.accessibility_text_bytes,
+        )?,
+    }
+    .validate()
+    .map_err(|_| "PLATFORM_QUOTA_CONFIG")
+}
+
+fn configure_resource_limits_from_data(
+    model: &mut Model,
+    config: &BTreeMap<String, Data>,
+) -> Result<ResourceLimits, &'static str> {
+    let limits = match parse_resource_limits(config, model.resource_limits()) {
+        Ok(limits) => limits,
+        Err(error) => {
+            model.record_quota_configuration_rejection();
+            return Err(error);
+        }
+    };
+    model
+        .configure_resource_limits(limits)
+        .map_err(model_error_code)
+}
+
+fn create_loaded_font(
+    model: &mut Model,
+    application_id: u64,
+    font_bytes: Vec<u8>,
+    load: impl FnOnce(Vec<u8>) -> Result<Vec<String>, TextError>,
+) -> Result<u64, &'static str> {
+    let mut state = ResourceState::Font {
+        family: String::new(),
+        bytes: Some(font_bytes),
+    };
+    model
+        .preflight_create(Some(application_id), &state)
+        .map_err(model_error_code)?;
+    let loader_bytes = match &state {
+        ResourceState::Font {
+            bytes: Some(bytes), ..
+        } => bytes.clone(),
+        _ => unreachable!("font resource must retain its source bytes"),
+    };
+    let families = load(loader_bytes).map_err(text_error_code)?;
+    let family = families.first().cloned().ok_or("PLATFORM_FONT_INVALID")?;
+    let ResourceState::Font {
+        family: state_family,
+        ..
+    } = &mut state
+    else {
+        unreachable!("font resource state changed during loading")
+    };
+    *state_family = family;
+    model
+        .create(Some(application_id), state)
+        .map_err(model_error_code)
+}
+
+fn create_loaded_image(
+    model: &mut Model,
+    application_id: u64,
+    source: &[u8],
+    decode: impl FnOnce(&[u8], usize) -> Result<(u32, u32, Vec<u8>), ImageDecodeError>,
+) -> Result<u64, &'static str> {
+    let placeholder = ResourceState::Image {
+        width: 0,
+        height: 0,
+        rgba: Vec::new(),
+    };
+    model
+        .preflight_create(Some(application_id), &placeholder)
+        .map_err(model_error_code)?;
+    let remaining_bytes = model.remaining_image_bytes();
+    let (width, height, rgba) = match decode(source, remaining_bytes) {
+        Ok(image) => image,
+        Err(ImageDecodeError::Invalid) => return Err("PLATFORM_IMAGE_INVALID"),
+        Err(ImageDecodeError::Quota) => {
+            model.record_quota_limit_rejection(QuotaKind::ImageBytes);
+            return Err(QuotaKind::ImageBytes.code());
+        }
+    };
+    model
+        .create(
+            Some(application_id),
+            ResourceState::Image {
+                width,
+                height,
+                rgba,
+            },
+        )
+        .map_err(model_error_code)
+}
+
+fn configured_limit(
+    config: &BTreeMap<String, Data>,
+    name: &str,
+    current: usize,
+) -> Result<usize, &'static str> {
+    let Some(value) = config.get(name) else {
+        return Ok(current);
+    };
+    let Data::Integer(value) = value else {
+        return Err("PLATFORM_QUOTA_CONFIG");
+    };
+    usize::try_from(*value).map_err(|_| "PLATFORM_QUOTA_CONFIG")
+}
+
+fn resource_limits_data(limits: ResourceLimits) -> Data {
+    Data::map([
+        ("资源总数", usize_data(limits.resources)),
+        ("窗口数", usize_data(limits.windows)),
+        ("计时器数", usize_data(limits.timers)),
+        ("图片数", usize_data(limits.images)),
+        ("字体数", usize_data(limits.fonts)),
+        ("图片字节", usize_data(limits.image_bytes)),
+        ("字体字节", usize_data(limits.font_bytes)),
+        ("帧字节", usize_data(limits.frame_bytes)),
+        ("无障碍节点", usize_data(limits.accessibility_nodes)),
+        (
+            "无障碍文字字节",
+            usize_data(limits.accessibility_text_bytes),
+        ),
+    ])
+}
+
+fn resource_usage_data(usage: ResourceUsage) -> Data {
+    Data::map([
+        ("资源总数", usize_data(usage.resources)),
+        ("窗口数", usize_data(usage.windows)),
+        ("计时器数", usize_data(usage.timers)),
+        ("图片数", usize_data(usage.images)),
+        ("字体数", usize_data(usage.fonts)),
+        ("图片字节", usize_data(usage.image_bytes)),
+        ("字体字节", usize_data(usage.font_bytes)),
+        ("帧字节", usize_data(usage.frame_bytes)),
+        ("无障碍节点", usize_data(usage.accessibility_nodes)),
+        ("无障碍文字字节", usize_data(usage.accessibility_text_bytes)),
+    ])
+}
+
+fn quota_metrics_data(metrics: QuotaMetrics) -> Data {
+    Data::map([
+        ("总数", u64_data(metrics.rejected)),
+        ("上限", u64_data(metrics.limit_rejected)),
+        ("配置", u64_data(metrics.configuration_rejected)),
+        ("冻结", u64_data(metrics.locked_rejected)),
+        (
+            "按配额",
+            Data::map([
+                ("资源总数", u64_data(metrics.resources)),
+                ("窗口数", u64_data(metrics.windows)),
+                ("计时器数", u64_data(metrics.timers)),
+                ("图片数", u64_data(metrics.images)),
+                ("字体数", u64_data(metrics.fonts)),
+                ("图片字节", u64_data(metrics.image_bytes)),
+                ("字体字节", u64_data(metrics.font_bytes)),
+                ("帧字节", u64_data(metrics.frame_bytes)),
+                ("无障碍节点", u64_data(metrics.accessibility_nodes)),
+                ("无障碍文字字节", u64_data(metrics.accessibility_text_bytes)),
             ]),
         ),
     ])
@@ -1597,23 +1851,65 @@ fn string_array(value: &Data) -> Result<Vec<String>, &'static str> {
         .collect()
 }
 
-fn decode_image(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), &'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageDecodeError {
+    Invalid,
+    Quota,
+}
+
+fn decode_image(bytes: &[u8], max_alloc: usize) -> Result<(u32, u32, Vec<u8>), ImageDecodeError> {
     if bytes.is_empty() {
-        return Err("PLATFORM_IMAGE_INVALID");
+        return Err(ImageDecodeError::Invalid);
     }
+    let (width, height) = limited_image_reader(bytes, max_alloc)?
+        .into_dimensions()
+        .map_err(image_decode_error)?;
+    let rgba_bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or(ImageDecodeError::Quota)?;
+    if rgba_bytes > max_alloc {
+        return Err(ImageDecodeError::Quota);
+    }
+    let decoded = limited_image_reader(bytes, max_alloc)?
+        .decode()
+        .map_err(image_decode_error)?;
+    let rgba = decoded.into_rgba8();
+    if rgba.len() != rgba_bytes {
+        return Err(ImageDecodeError::Invalid);
+    }
+    Ok((width, height, rgba.into_raw()))
+}
+
+fn limited_image_reader(
+    bytes: &[u8],
+    max_alloc: usize,
+) -> Result<image::ImageReader<Cursor<&[u8]>>, ImageDecodeError> {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(16_384);
     limits.max_image_height = Some(16_384);
-    limits.max_alloc = Some(256 * 1024 * 1024);
+    limits.max_alloc = Some(u64::try_from(max_alloc).unwrap_or(u64::MAX));
     let mut reader = image::ImageReader::new(Cursor::new(bytes));
     reader = reader
         .with_guessed_format()
-        .map_err(|_| "PLATFORM_IMAGE_INVALID")?;
+        .map_err(|_| ImageDecodeError::Invalid)?;
     reader.limits(limits);
-    let decoded = reader.decode().map_err(|_| "PLATFORM_IMAGE_INVALID")?;
-    let rgba = decoded.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    Ok((width, height, rgba.into_raw()))
+    Ok(reader)
+}
+
+fn image_decode_error(error: image::ImageError) -> ImageDecodeError {
+    match error {
+        image::ImageError::Limits(limit)
+            if matches!(
+                limit.kind(),
+                image::error::LimitErrorKind::InsufficientMemory
+            ) =>
+        {
+            ImageDecodeError::Quota
+        }
+        _ => ImageDecodeError::Invalid,
+    }
 }
 
 const fn validate_clipboard_text_length(length: usize) -> Result<(), &'static str> {
@@ -1686,13 +1982,26 @@ fn draw_error_code(error: protocol::ProtocolError) -> &'static str {
     }
 }
 
-const fn frame_model_error(error: crate::model::ModelError) -> &'static str {
+const fn model_error_code(error: ModelError) -> &'static str {
     match error {
-        crate::model::ModelError::Missing(_) => "PLATFORM_RESOURCE_CLOSED",
-        crate::model::ModelError::Kind(_) => "PLATFORM_RESOURCE_TYPE",
-        crate::model::ModelError::FrameSequence => "PLATFORM_FRAME_SEQUENCE",
-        crate::model::ModelError::Parent(_) | crate::model::ModelError::Overflow => {
-            "PLATFORM_RESOURCE"
+        ModelError::Missing(_) => "PLATFORM_RESOURCE_CLOSED",
+        ModelError::Kind(_) => "PLATFORM_RESOURCE_TYPE",
+        ModelError::FrameSequence => "PLATFORM_FRAME_SEQUENCE",
+        ModelError::Quota(kind) => kind.code(),
+        ModelError::QuotaConfiguration(_) => "PLATFORM_QUOTA_CONFIG",
+        ModelError::QuotaLocked => "PLATFORM_QUOTA_LOCKED",
+        ModelError::ApplicationRunning => "PLATFORM_EVENT_LOOP_RUNNING",
+        ModelError::ApplicationExited => "PLATFORM_APPLICATION_EXITED",
+        ModelError::Parent(_) | ModelError::Overflow => "PLATFORM_RESOURCE_LIMIT",
+    }
+}
+
+const fn resource_creation_error_code(error: ResourceCreationError) -> &'static str {
+    match error {
+        ResourceCreationError::Model(error) => model_error_code(error),
+        ResourceCreationError::Queue(crate::event::EventQueueError::Full) => "PLATFORM_QUEUE_FULL",
+        ResourceCreationError::Queue(crate::event::EventQueueError::InvalidNumber) => {
+            "PLATFORM_VALUE_TYPE"
         }
     }
 }
@@ -1879,6 +2188,7 @@ mod tests {
             protocol_info().as_map().unwrap()["平台次"],
             Data::Integer(PLATFORM_MINOR)
         );
+        assert_eq!(PLATFORM_MINOR, 7);
         assert_eq!(protocol_info().as_map().unwrap()["ABI"], Data::Integer(2));
         assert_eq!(
             protocol_info().as_map().unwrap()["事件次"],
@@ -1907,6 +2217,38 @@ mod tests {
         assert_eq!(
             capabilities().as_map().unwrap()["运行可观测性"],
             Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["应用资源配额"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["应用资源配额可下调"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["应用资源配额拒绝统计"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["应用生命周期状态"],
+            string_list(&["就绪", "运行中", "退出请求", "已退出", "已关闭"])
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["应用退出幂等"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["应用生命周期统计"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["应用关闭资源归零"],
+            Data::Bool(true)
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["应用资源硬上限"],
+            resource_limits_data(ResourceLimits::default())
         );
         assert_eq!(
             capabilities().as_map().unwrap()["待呈现帧上限"],
@@ -2020,10 +2362,7 @@ mod tests {
         let application = model
             .create(
                 None,
-                ResourceState::Application {
-                    name: "测试".to_owned(),
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
             )
             .unwrap();
         let window = model
@@ -2041,10 +2380,23 @@ mod tests {
         }
         model.submit_frame(window, vec![1, 2], 1.0).unwrap();
         model.submit_frame(window, vec![3, 4, 5], 2.0).unwrap();
+        model.record_quota_configuration_rejection();
+        assert_eq!(
+            model.configure_resource_limits(ResourceLimits::default()),
+            Err(ModelError::QuotaLocked)
+        );
 
         let snapshot = debug_snapshot(&model);
         let snapshot = snapshot.as_map().unwrap();
         assert_eq!(snapshot["待处理事件"], Data::Integer(1));
+        assert_eq!(snapshot["应用状态"], Data::String("就绪".to_owned()));
+        assert_eq!(snapshot["运行中"], Data::Bool(false));
+        assert_eq!(snapshot["退出错误"], Data::Nil);
+        let lifecycle = snapshot["应用生命周期统计"].as_map().unwrap();
+        assert_eq!(lifecycle["运行开始总数"], Data::Integer(0));
+        assert_eq!(lifecycle["退出请求总数"], Data::Integer(0));
+        assert_eq!(lifecycle["重复退出总数"], Data::Integer(0));
+        assert_eq!(lifecycle["资源归零总数"], Data::Integer(0));
         let events = snapshot["事件队列"].as_map().unwrap();
         assert_eq!(events["接收总数"], Data::Integer(2));
         assert_eq!(events["合并总数"], Data::Integer(1));
@@ -2052,6 +2404,25 @@ mod tests {
         let resources = snapshot["资源统计"].as_map().unwrap();
         assert_eq!(resources["当前"], Data::Integer(2));
         assert_eq!(resources["创建总数"], Data::Integer(2));
+        let quota = snapshot["资源配额"].as_map().unwrap();
+        assert_eq!(quota["已冻结"], Data::Bool(true));
+        assert_eq!(
+            quota["上限"],
+            resource_limits_data(ResourceLimits::default())
+        );
+        let quota_usage = quota["使用"].as_map().unwrap();
+        assert_eq!(quota_usage["资源总数"], Data::Integer(2));
+        assert_eq!(quota_usage["窗口数"], Data::Integer(1));
+        assert_eq!(quota_usage["帧字节"], Data::Integer(3));
+        let quota_rejections = quota["拒绝统计"].as_map().unwrap();
+        assert_eq!(quota_rejections["总数"], Data::Integer(2));
+        assert_eq!(quota_rejections["上限"], Data::Integer(0));
+        assert_eq!(quota_rejections["配置"], Data::Integer(1));
+        assert_eq!(quota_rejections["冻结"], Data::Integer(1));
+        assert_eq!(
+            quota_rejections["按配额"].as_map().unwrap()["帧字节"],
+            Data::Integer(0)
+        );
         let frames = snapshot["帧统计"].as_map().unwrap();
         assert_eq!(frames["待呈现"], Data::Integer(1));
         assert_eq!(frames["提交总数"], Data::Integer(2));
@@ -2065,16 +2436,210 @@ mod tests {
     }
 
     #[test]
+    fn parses_strict_resource_quota_overrides_and_stable_errors() {
+        let current = ResourceLimits::default();
+        let limits = parse_resource_limits(
+            &BTreeMap::from([
+                ("窗口数".to_owned(), Data::Integer(4)),
+                ("图片字节".to_owned(), Data::Integer(1_024)),
+                ("无障碍节点".to_owned(), Data::Integer(2_048)),
+            ]),
+            current,
+        )
+        .unwrap();
+        assert_eq!(limits.windows, 4);
+        assert_eq!(limits.image_bytes, 1_024);
+        assert_eq!(limits.accessibility_nodes, 2_048);
+        assert_eq!(limits.timers, current.timers);
+        assert_eq!(
+            parse_resource_limits(
+                &BTreeMap::from([("窗口".to_owned(), Data::Integer(1))]),
+                current,
+            ),
+            Err("PLATFORM_QUOTA_CONFIG")
+        );
+        assert_eq!(
+            parse_resource_limits(
+                &BTreeMap::from([("窗口数".to_owned(), Data::Integer(-1))]),
+                current,
+            ),
+            Err("PLATFORM_QUOTA_CONFIG")
+        );
+        assert_eq!(
+            parse_resource_limits(
+                &BTreeMap::from([(
+                    "窗口数".to_owned(),
+                    Data::Integer(i64::try_from(current.windows + 1).unwrap()),
+                )]),
+                current,
+            ),
+            Err("PLATFORM_QUOTA_CONFIG")
+        );
+        assert_eq!(
+            model_error_code(ModelError::Quota(crate::model::QuotaKind::Windows)),
+            "PLATFORM_QUOTA_WINDOWS"
+        );
+        assert_eq!(
+            model_error_code(ModelError::QuotaLocked),
+            "PLATFORM_QUOTA_LOCKED"
+        );
+    }
+
+    #[test]
+    fn counts_each_quota_configuration_rejection_once() {
+        let mut model = Model::default();
+        let invalid = BTreeMap::from([("窗口".to_owned(), Data::Integer(1))]);
+        assert_eq!(
+            configure_resource_limits_from_data(&mut model, &invalid),
+            Err("PLATFORM_QUOTA_CONFIG")
+        );
+        assert_eq!(model.quota_metrics().rejected, 1);
+        assert_eq!(model.quota_metrics().configuration_rejected, 1);
+
+        let excessive = BTreeMap::from([(
+            "窗口数".to_owned(),
+            Data::Integer(i64::try_from(ResourceLimits::default().windows + 1).unwrap()),
+        )]);
+        assert_eq!(
+            configure_resource_limits_from_data(&mut model, &excessive),
+            Err("PLATFORM_QUOTA_CONFIG")
+        );
+        assert_eq!(model.quota_metrics().rejected, 2);
+        assert_eq!(model.quota_metrics().configuration_rejected, 2);
+
+        model.lock_resource_limits();
+        assert_eq!(
+            configure_resource_limits_from_data(&mut model, &BTreeMap::new()),
+            Err("PLATFORM_QUOTA_LOCKED")
+        );
+        assert_eq!(model.quota_metrics().rejected, 3);
+        assert_eq!(model.quota_metrics().configuration_rejected, 2);
+        assert_eq!(model.quota_metrics().locked_rejected, 1);
+    }
+
+    #[test]
+    fn font_quota_preflight_runs_before_the_text_loader() {
+        let limits = ResourceLimits {
+            resources: 2,
+            fonts: 0,
+            font_bytes: 16,
+            ..ResourceLimits::default()
+        };
+        let mut model = Model::with_limits(limits);
+        let application = model
+            .create(
+                None,
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
+            )
+            .unwrap();
+        let mut loader_called = false;
+        assert_eq!(
+            create_loaded_font(&mut model, application, vec![1, 2, 3], |_| {
+                loader_called = true;
+                Ok(vec!["测试字体".to_owned()])
+            }),
+            Err("PLATFORM_QUOTA_FONTS")
+        );
+        assert!(!loader_called);
+        assert_eq!(model.count(ResourceKind::Font), 0);
+        assert!(!model.resource_limits_locked());
+        assert_eq!(model.quota_metrics().fonts, 1);
+
+        let mut model = Model::default();
+        let application = model
+            .create(
+                None,
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
+            )
+            .unwrap();
+        let font = create_loaded_font(&mut model, application, vec![4, 5, 6], |bytes| {
+            assert_eq!(bytes, vec![4, 5, 6]);
+            Ok(vec!["测试字体".to_owned()])
+        })
+        .unwrap();
+        let ResourceState::Font { family, bytes } = &model.get(font).unwrap().state else {
+            panic!("font state expected")
+        };
+        assert_eq!(family, "测试字体");
+        assert_eq!(bytes.as_deref(), Some([4, 5, 6].as_slice()));
+    }
+
+    #[test]
+    fn image_quota_preflight_bounds_the_decoder_by_remaining_bytes() {
+        let limits = ResourceLimits {
+            resources: 2,
+            images: 0,
+            image_bytes: 8,
+            ..ResourceLimits::default()
+        };
+        let mut model = Model::with_limits(limits);
+        let application = model
+            .create(
+                None,
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
+            )
+            .unwrap();
+        let mut decoder_called = false;
+        assert_eq!(
+            create_loaded_image(&mut model, application, &[1], |_, _| {
+                decoder_called = true;
+                Ok((1, 1, vec![0; 4]))
+            }),
+            Err("PLATFORM_QUOTA_IMAGES")
+        );
+        assert!(!decoder_called);
+        assert_eq!(model.quota_metrics().images, 1);
+
+        let limits = ResourceLimits {
+            resources: 2,
+            images: 1,
+            image_bytes: 8,
+            ..ResourceLimits::default()
+        };
+        let mut model = Model::with_limits(limits);
+        let application = model
+            .create(
+                None,
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
+            )
+            .unwrap();
+        assert_eq!(
+            create_loaded_image(&mut model, application, &[1], |_, remaining| {
+                assert_eq!(remaining, 8);
+                Err(ImageDecodeError::Quota)
+            }),
+            Err("PLATFORM_QUOTA_IMAGE_BYTES")
+        );
+        assert_eq!(model.quota_metrics().image_bytes, 1);
+        assert!(!model.resource_limits_locked());
+
+        let image = create_loaded_image(&mut model, application, &[1], |_, remaining| {
+            assert_eq!(remaining, 8);
+            Ok((1, 1, vec![10, 20, 30, 255]))
+        })
+        .unwrap();
+        assert_eq!(model.resource_usage().image_bytes, 4);
+        assert_eq!(model.get(image).unwrap().state.kind(), ResourceKind::Image);
+    }
+
+    #[test]
     fn decodes_bounded_png_resources() {
         let source = image::RgbaImage::from_pixel(2, 1, image::Rgba([10, 20, 30, 255]));
         let mut encoded = Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(source)
             .write_to(&mut encoded, image::ImageFormat::Png)
             .unwrap();
-        let (width, height, rgba) = decode_image(encoded.get_ref()).unwrap();
+        let (width, height, rgba) = decode_image(encoded.get_ref(), 1_024).unwrap();
         assert_eq!([width, height], [2, 1]);
         assert_eq!(rgba, vec![10, 20, 30, 255, 10, 20, 30, 255]);
-        assert_eq!(decode_image(&[1, 2, 3]), Err("PLATFORM_IMAGE_INVALID"));
+        assert_eq!(
+            decode_image(encoded.get_ref(), 7),
+            Err(ImageDecodeError::Quota)
+        );
+        assert_eq!(
+            decode_image(&[1, 2, 3], 1_024),
+            Err(ImageDecodeError::Invalid)
+        );
     }
 
     #[test]

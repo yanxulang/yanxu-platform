@@ -171,6 +171,31 @@
           "async": false,
           "documentation": "",
           "kind": "method",
+          "name": "资源配额",
+          "parameters": [],
+          "result": "典",
+          "signature": "法（）：典",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
+          "name": "配置资源配额",
+          "parameters": [
+            {
+              "name": "配置",
+              "type": "典"
+            }
+          ],
+          "result": "典",
+          "signature": "法（典）：典",
+          "static": false
+        },
+        {
+          "async": false,
+          "documentation": "",
+          "kind": "method",
           "name": "计时器",
           "parameters": [
             {

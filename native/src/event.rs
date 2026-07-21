@@ -270,6 +270,21 @@ impl EventBatcher {
         Ok(())
     }
 
+    pub fn push_batch(
+        &mut self,
+        events: impl IntoIterator<Item = PlatformEvent>,
+    ) -> Result<(), EventQueueError> {
+        let mut transaction = self.clone();
+        for event in events {
+            if let Err(error) = transaction.push(event) {
+                self.rejected = self.rejected.saturating_add(1);
+                return Err(error);
+            }
+        }
+        *self = transaction;
+        Ok(())
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.events.len()
@@ -514,6 +529,40 @@ mod tests {
                 drained: 0,
             }
         );
+    }
+
+    #[test]
+    fn event_batches_commit_all_or_nothing() {
+        let mut batcher = EventBatcher::with_capacity(1);
+        batcher
+            .push(PlatformEvent::new(EventKind::PointerMoved, Some(1), 1.0))
+            .unwrap();
+
+        assert_eq!(
+            batcher.push_batch([
+                PlatformEvent::new(EventKind::PointerMoved, Some(1), 2.0),
+                PlatformEvent::new(EventKind::KeyDown, Some(1), 3.0),
+            ]),
+            Err(EventQueueError::Full)
+        );
+        assert_eq!(
+            batcher.metrics(),
+            EventQueueMetrics {
+                capacity: 1,
+                queued: 1,
+                high_watermark: 1,
+                accepted: 1,
+                coalesced: 0,
+                rejected: 1,
+                batches: 0,
+                drained: 0,
+            }
+        );
+
+        let batch = batcher.take_data().unwrap();
+        let event = events(&batch)[0].as_map().unwrap();
+        assert_eq!(event["序号"], Data::Integer(1));
+        assert_eq!(event["时间"], Data::Number(1.0));
     }
 
     #[test]
