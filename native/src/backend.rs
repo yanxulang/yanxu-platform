@@ -10,8 +10,8 @@ use crate::bridge::{encode_data, free_value};
 use crate::data::Data;
 use crate::event::{EVENT_MAJOR, EVENT_MINOR, EventKind, PlatformEvent};
 use crate::model::{
-    FrameSubmission, Model, ModelError, ResourceKind, ResourceLimits, ResourceState, ResourceUsage,
-    TimerState, WindowState,
+    FrameSubmission, Model, ModelError, QuotaMetrics, ResourceKind, ResourceLimits, ResourceState,
+    ResourceUsage, TimerState, WindowState,
 };
 use crate::protocol;
 use crate::sync::{RecoverMutex, recovered_lock_count};
@@ -504,10 +504,7 @@ pub unsafe fn call(
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
             let config = map(&arguments[1])?;
             let mut model = application.model.lock_recover();
-            let limits = parse_resource_limits(config, model.resource_limits())?;
-            let limits = model
-                .configure_resource_limits(limits)
-                .map_err(model_error_code)?;
+            let limits = configure_resource_limits_from_data(&mut model, config)?;
             Ok(Output::Value(resource_limits_data(limits)))
         }
         Operation::FontFamilies => {
@@ -1047,6 +1044,7 @@ fn capabilities() -> Data {
         ("运行可观测性", Data::Bool(true)),
         ("应用资源配额", Data::Bool(true)),
         ("应用资源配额可下调", Data::Bool(true)),
+        ("应用资源配额拒绝统计", Data::Bool(true)),
         (
             "应用资源硬上限",
             resource_limits_data(ResourceLimits::default()),
@@ -1269,6 +1267,7 @@ fn debug_snapshot(model: &Model) -> Data {
     let resources = model.resource_metrics();
     let resource_limits = model.resource_limits();
     let resource_usage = model.resource_usage();
+    let quota_metrics = model.quota_metrics();
     let frames = model.frame_metrics();
     let accessibility = model.accessibility_metrics();
     Data::map([
@@ -1308,6 +1307,7 @@ fn debug_snapshot(model: &Model) -> Data {
                 ("已冻结", Data::Bool(model.resource_limits_locked())),
                 ("上限", resource_limits_data(resource_limits)),
                 ("使用", resource_usage_data(resource_usage)),
+                ("拒绝统计", quota_metrics_data(quota_metrics)),
             ]),
         ),
         (
@@ -1407,6 +1407,22 @@ fn parse_resource_limits(
     .map_err(|_| "PLATFORM_QUOTA_CONFIG")
 }
 
+fn configure_resource_limits_from_data(
+    model: &mut Model,
+    config: &BTreeMap<String, Data>,
+) -> Result<ResourceLimits, &'static str> {
+    let limits = match parse_resource_limits(config, model.resource_limits()) {
+        Ok(limits) => limits,
+        Err(error) => {
+            model.record_quota_configuration_rejection();
+            return Err(error);
+        }
+    };
+    model
+        .configure_resource_limits(limits)
+        .map_err(model_error_code)
+}
+
 fn configured_limit(
     config: &BTreeMap<String, Data>,
     name: &str,
@@ -1451,6 +1467,30 @@ fn resource_usage_data(usage: ResourceUsage) -> Data {
         ("帧字节", usize_data(usage.frame_bytes)),
         ("无障碍节点", usize_data(usage.accessibility_nodes)),
         ("无障碍文字字节", usize_data(usage.accessibility_text_bytes)),
+    ])
+}
+
+fn quota_metrics_data(metrics: QuotaMetrics) -> Data {
+    Data::map([
+        ("总数", u64_data(metrics.rejected)),
+        ("上限", u64_data(metrics.limit_rejected)),
+        ("配置", u64_data(metrics.configuration_rejected)),
+        ("冻结", u64_data(metrics.locked_rejected)),
+        (
+            "按配额",
+            Data::map([
+                ("资源总数", u64_data(metrics.resources)),
+                ("窗口数", u64_data(metrics.windows)),
+                ("计时器数", u64_data(metrics.timers)),
+                ("图片数", u64_data(metrics.images)),
+                ("字体数", u64_data(metrics.fonts)),
+                ("图片字节", u64_data(metrics.image_bytes)),
+                ("字体字节", u64_data(metrics.font_bytes)),
+                ("帧字节", u64_data(metrics.frame_bytes)),
+                ("无障碍节点", u64_data(metrics.accessibility_nodes)),
+                ("无障碍文字字节", u64_data(metrics.accessibility_text_bytes)),
+            ]),
+        ),
     ])
 }
 
@@ -2051,6 +2091,10 @@ mod tests {
             Data::Bool(true)
         );
         assert_eq!(
+            capabilities().as_map().unwrap()["应用资源配额拒绝统计"],
+            Data::Bool(true)
+        );
+        assert_eq!(
             capabilities().as_map().unwrap()["应用资源硬上限"],
             resource_limits_data(ResourceLimits::default())
         );
@@ -2187,6 +2231,11 @@ mod tests {
         }
         model.submit_frame(window, vec![1, 2], 1.0).unwrap();
         model.submit_frame(window, vec![3, 4, 5], 2.0).unwrap();
+        model.record_quota_configuration_rejection();
+        assert_eq!(
+            model.configure_resource_limits(ResourceLimits::default()),
+            Err(ModelError::QuotaLocked)
+        );
 
         let snapshot = debug_snapshot(&model);
         let snapshot = snapshot.as_map().unwrap();
@@ -2208,6 +2257,15 @@ mod tests {
         assert_eq!(quota_usage["资源总数"], Data::Integer(2));
         assert_eq!(quota_usage["窗口数"], Data::Integer(1));
         assert_eq!(quota_usage["帧字节"], Data::Integer(3));
+        let quota_rejections = quota["拒绝统计"].as_map().unwrap();
+        assert_eq!(quota_rejections["总数"], Data::Integer(2));
+        assert_eq!(quota_rejections["上限"], Data::Integer(0));
+        assert_eq!(quota_rejections["配置"], Data::Integer(1));
+        assert_eq!(quota_rejections["冻结"], Data::Integer(1));
+        assert_eq!(
+            quota_rejections["按配额"].as_map().unwrap()["帧字节"],
+            Data::Integer(0)
+        );
         let frames = snapshot["帧统计"].as_map().unwrap();
         assert_eq!(frames["待呈现"], Data::Integer(1));
         assert_eq!(frames["提交总数"], Data::Integer(2));
@@ -2268,6 +2326,38 @@ mod tests {
             model_error_code(ModelError::QuotaLocked),
             "PLATFORM_QUOTA_LOCKED"
         );
+    }
+
+    #[test]
+    fn counts_each_quota_configuration_rejection_once() {
+        let mut model = Model::default();
+        let invalid = BTreeMap::from([("窗口".to_owned(), Data::Integer(1))]);
+        assert_eq!(
+            configure_resource_limits_from_data(&mut model, &invalid),
+            Err("PLATFORM_QUOTA_CONFIG")
+        );
+        assert_eq!(model.quota_metrics().rejected, 1);
+        assert_eq!(model.quota_metrics().configuration_rejected, 1);
+
+        let excessive = BTreeMap::from([(
+            "窗口数".to_owned(),
+            Data::Integer(i64::try_from(ResourceLimits::default().windows + 1).unwrap()),
+        )]);
+        assert_eq!(
+            configure_resource_limits_from_data(&mut model, &excessive),
+            Err("PLATFORM_QUOTA_CONFIG")
+        );
+        assert_eq!(model.quota_metrics().rejected, 2);
+        assert_eq!(model.quota_metrics().configuration_rejected, 2);
+
+        model.lock_resource_limits();
+        assert_eq!(
+            configure_resource_limits_from_data(&mut model, &BTreeMap::new()),
+            Err("PLATFORM_QUOTA_LOCKED")
+        );
+        assert_eq!(model.quota_metrics().rejected, 3);
+        assert_eq!(model.quota_metrics().configuration_rejected, 2);
+        assert_eq!(model.quota_metrics().locked_rejected, 1);
     }
 
     #[test]

@@ -191,6 +191,54 @@ impl QuotaKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QuotaMetrics {
+    pub rejected: u64,
+    pub limit_rejected: u64,
+    pub configuration_rejected: u64,
+    pub locked_rejected: u64,
+    pub resources: u64,
+    pub windows: u64,
+    pub timers: u64,
+    pub images: u64,
+    pub fonts: u64,
+    pub image_bytes: u64,
+    pub font_bytes: u64,
+    pub frame_bytes: u64,
+    pub accessibility_nodes: u64,
+    pub accessibility_text_bytes: u64,
+}
+
+impl QuotaMetrics {
+    fn record_limit(&mut self, kind: QuotaKind) {
+        self.rejected = self.rejected.saturating_add(1);
+        self.limit_rejected = self.limit_rejected.saturating_add(1);
+        let counter = match kind {
+            QuotaKind::Resources => &mut self.resources,
+            QuotaKind::Windows => &mut self.windows,
+            QuotaKind::Timers => &mut self.timers,
+            QuotaKind::Images => &mut self.images,
+            QuotaKind::Fonts => &mut self.fonts,
+            QuotaKind::ImageBytes => &mut self.image_bytes,
+            QuotaKind::FontBytes => &mut self.font_bytes,
+            QuotaKind::FrameBytes => &mut self.frame_bytes,
+            QuotaKind::AccessibilityNodes => &mut self.accessibility_nodes,
+            QuotaKind::AccessibilityTextBytes => &mut self.accessibility_text_bytes,
+        };
+        *counter = counter.saturating_add(1);
+    }
+
+    fn record_configuration(&mut self) {
+        self.rejected = self.rejected.saturating_add(1);
+        self.configuration_rejected = self.configuration_rejected.saturating_add(1);
+    }
+
+    fn record_locked(&mut self) {
+        self.rejected = self.rejected.saturating_add(1);
+        self.locked_rejected = self.locked_rejected.saturating_add(1);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowState {
     pub title: String,
@@ -478,6 +526,7 @@ pub struct Model {
     resource_limits: ResourceLimits,
     resource_limits_locked: bool,
     resource_usage: ResourceUsage,
+    quota_metrics: QuotaMetrics,
     resource_metrics: ResourceMetrics,
     frame_metrics: FrameMetrics,
     accessibility_metrics: AccessibilityMetrics,
@@ -496,6 +545,7 @@ impl Default for Model {
             resource_limits: ResourceLimits::default(),
             resource_limits_locked: false,
             resource_usage: ResourceUsage::default(),
+            quota_metrics: QuotaMetrics::default(),
             resource_metrics: ResourceMetrics::default(),
             frame_metrics: FrameMetrics::default(),
             accessibility_metrics: AccessibilityMetrics::default(),
@@ -716,11 +766,19 @@ impl Model {
         &mut self,
         limits: ResourceLimits,
     ) -> Result<ResourceLimits, ModelError> {
-        let limits = limits.validate().map_err(ModelError::QuotaConfiguration)?;
+        let limits = match limits.validate() {
+            Ok(limits) => limits,
+            Err(kind) => {
+                self.quota_metrics.record_configuration();
+                return Err(ModelError::QuotaConfiguration(kind));
+            }
+        };
         if self.resource_limits_locked || self.running {
+            self.quota_metrics.record_locked();
             return Err(ModelError::QuotaLocked);
         }
         if let Some(kind) = quota_exceeded(self.resource_usage, limits) {
+            self.quota_metrics.record_configuration();
             return Err(ModelError::QuotaConfiguration(kind));
         }
         self.resource_limits = limits;
@@ -741,12 +799,25 @@ impl Model {
         self.resource_usage
     }
 
-    fn checked_resource_usage(&self, added: ResourceUsage) -> Result<ResourceUsage, ModelError> {
-        let next = self
-            .resource_usage
-            .checked_add(added)
-            .ok_or(ModelError::Quota(QuotaKind::Resources))?;
+    #[must_use]
+    pub const fn quota_metrics(&self) -> QuotaMetrics {
+        self.quota_metrics
+    }
+
+    pub fn record_quota_configuration_rejection(&mut self) {
+        self.quota_metrics.record_configuration();
+    }
+
+    fn checked_resource_usage(
+        &mut self,
+        added: ResourceUsage,
+    ) -> Result<ResourceUsage, ModelError> {
+        let Some(next) = self.resource_usage.checked_add(added) else {
+            self.quota_metrics.record_limit(QuotaKind::Resources);
+            return Err(ModelError::Quota(QuotaKind::Resources));
+        };
         if let Some(kind) = quota_exceeded(next, self.resource_limits) {
+            self.quota_metrics.record_limit(kind);
             return Err(ModelError::Quota(kind));
         }
         Ok(next)
@@ -770,9 +841,13 @@ impl Model {
             .resource_usage
             .frame_bytes
             .checked_sub(previous_bytes)
-            .and_then(|current| current.checked_add(bytes))
-            .ok_or(ModelError::Quota(QuotaKind::FrameBytes))?;
+            .and_then(|current| current.checked_add(bytes));
+        let Some(next_frame_bytes) = next_frame_bytes else {
+            self.quota_metrics.record_limit(QuotaKind::FrameBytes);
+            return Err(ModelError::Quota(QuotaKind::FrameBytes));
+        };
         if next_frame_bytes > self.resource_limits.frame_bytes {
+            self.quota_metrics.record_limit(QuotaKind::FrameBytes);
             return Err(ModelError::Quota(QuotaKind::FrameBytes));
         }
         let (generation, replaced_sequence) = {
@@ -876,6 +951,8 @@ impl Model {
             Some(value) if value <= self.resource_limits.accessibility_nodes => value,
             _ => {
                 self.record_accessibility_rejection();
+                self.quota_metrics
+                    .record_limit(QuotaKind::AccessibilityNodes);
                 return Err(ModelError::Quota(QuotaKind::AccessibilityNodes).into());
             }
         };
@@ -888,6 +965,8 @@ impl Model {
             Some(value) if value <= self.resource_limits.accessibility_text_bytes => value,
             _ => {
                 self.record_accessibility_rejection();
+                self.quota_metrics
+                    .record_limit(QuotaKind::AccessibilityTextBytes);
                 return Err(ModelError::Quota(QuotaKind::AccessibilityTextBytes).into());
             }
         };
@@ -1284,6 +1363,16 @@ mod tests {
                 ..ResourceUsage::default()
             }
         );
+        assert_eq!(
+            model.quota_metrics(),
+            QuotaMetrics {
+                rejected: 2,
+                limit_rejected: 2,
+                resources: 1,
+                windows: 1,
+                ..QuotaMetrics::default()
+            }
+        );
 
         model.close(window).unwrap();
         let replacement = model
@@ -1319,6 +1408,14 @@ mod tests {
             model.configure_resource_limits(ResourceLimits::default()),
             Err(ModelError::QuotaLocked)
         );
+        assert_eq!(
+            model.quota_metrics(),
+            QuotaMetrics {
+                rejected: 1,
+                locked_rejected: 1,
+                ..QuotaMetrics::default()
+            }
+        );
     }
 
     #[test]
@@ -1352,6 +1449,15 @@ mod tests {
         assert_eq!(
             model.configure_resource_limits(ResourceLimits::default()),
             Err(ModelError::QuotaLocked)
+        );
+        assert_eq!(
+            model.quota_metrics(),
+            QuotaMetrics {
+                rejected: 4,
+                configuration_rejected: 2,
+                locked_rejected: 2,
+                ..QuotaMetrics::default()
+            }
         );
     }
 
@@ -1410,6 +1516,18 @@ mod tests {
             ResourceUsage {
                 resources: 1,
                 ..ResourceUsage::default()
+            }
+        );
+        assert_eq!(
+            model.quota_metrics(),
+            QuotaMetrics {
+                rejected: 4,
+                limit_rejected: 4,
+                windows: 1,
+                timers: 1,
+                images: 1,
+                fonts: 1,
+                ..QuotaMetrics::default()
             }
         );
     }
@@ -1484,6 +1602,8 @@ mod tests {
         );
         model.close(font).unwrap();
         assert_eq!(model.resource_usage().font_bytes, 0);
+        assert_eq!(model.quota_metrics().image_bytes, 1);
+        assert_eq!(model.quota_metrics().font_bytes, 1);
         model.close(application).unwrap();
         assert_eq!(model.resource_usage(), ResourceUsage::default());
     }
@@ -1655,6 +1775,7 @@ mod tests {
         assert_eq!(first.frame, vec![7, 8, 9, 10, 11]);
         assert_eq!(first.frame_generation, 2);
         assert_eq!(model.frame_metrics().submitted, 2);
+        assert_eq!(model.quota_metrics().frame_bytes, 2);
 
         model.close(first_window).unwrap();
         assert_eq!(model.resource_usage().frame_bytes, 0);
@@ -1974,6 +2095,9 @@ mod tests {
         assert_eq!(second.accessibility.revision(), 0);
         assert!(second.accessibility.tree().is_none());
         assert_eq!(model.accessibility_metrics().rejected, 2);
+        assert_eq!(model.quota_metrics().accessibility_nodes, 1);
+        assert_eq!(model.quota_metrics().accessibility_text_bytes, 1);
+        assert_eq!(model.quota_metrics().limit_rejected, 2);
         assert_eq!(model.resource_usage().accessibility_nodes, 1);
         assert_eq!(model.resource_usage().accessibility_text_bytes, 3);
 
