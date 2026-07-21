@@ -234,8 +234,8 @@ jobs:
         run: |
           set -euo pipefail
           sh scripts/verify-release-source.sh
-          grep -F '29808592375' docs/ARTIFACT_PROVENANCE.md
-          grep -F '3d1dae4b4546762902e99d37b517f383c8a7a521' docs/ARTIFACT_PROVENANCE.md
+          grep -F '29816339755' docs/ARTIFACT_PROVENANCE.md
+          grep -F '36e70610536791d12afe70abdfb0316d4b002c4a' docs/ARTIFACT_PROVENANCE.md
           jq -e \
             '.schema == 1 and .package_version == "1.0.0" and
              .profile == "release" and .os == "linux" and .arch == "x86_64" and

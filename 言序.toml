@@ -22,25 +22,25 @@ ABI = 2
 # scripts/prepare-current.sh 在此后追加当前平台的制品、摘要与大小。
 [原生.linux.x64]
 文件 = "dist/x86_64-unknown-linux-gnu/libyanxu_platform_native.so"
-校验和 = "4d321de2e9176c0db73f0f1f7f5e44b6da1e648c379cb1d7bf9e81bc3bebcf4a"
-大小 = 15304480
+校验和 = "5a6486c035b79b5140cbea8e528bdaa7439f8155072b01780e67c82b4971c751"
+大小 = 15304688
 [原生.linux.arm64]
 文件 = "dist/aarch64-unknown-linux-gnu/libyanxu_platform_native.so"
-校验和 = "75f14e39003d06fd1e8c25244ebdb1ce28801c761d3aaf9c7a9ce7a166600a1d"
-大小 = 14553968
+校验和 = "e642b292d25e0498a60841a95256ad37c2cbff976d5d919f2406b8c0800f6caa"
+大小 = 14551928
 [原生.macos.x64]
 文件 = "dist/x86_64-apple-darwin/libyanxu_platform_native.dylib"
-校验和 = "96f604c01981e7cdbec5e79e7bfa6b4f806b87b6d79e391d29d6a2f0c03014bd"
-大小 = 6524288
+校验和 = "390679cbb529595409dc60c20203cf051d67b5e33ce29b9154226212ea588a13"
+大小 = 6524304
 [原生.macos.arm64]
 文件 = "dist/aarch64-apple-darwin/libyanxu_platform_native.dylib"
-校验和 = "12859a10f5e24b402b481d890f5dafaa8ba1be71b8f99a3366037042f8ea3bf4"
+校验和 = "4ba2a55db0828178d67c555500844bc2e03856bef79aeddae96bf0d3bfec6fdb"
 大小 = 6129760
 [原生.windows.x64]
 文件 = "dist/x86_64-pc-windows-msvc/yanxu_platform_native.dll"
-校验和 = "8ce2ea3f6f09f7c45129207c1fbb6b3cc272b2dd7e1d5e8686b805d12fe18859"
+校验和 = "be26a1098285e12ae2da7b42d877c468dad543c7ffda826e4cb4495029cfffe6"
 大小 = 4951552
 [原生.windows.arm64]
 文件 = "dist/aarch64-pc-windows-msvc/yanxu_platform_native.dll"
-校验和 = "d624758e1ca47f589168ca8fdbe2f14bb4f0b9d2d98bb29e06a13de168db5973"
-大小 = 4255232
+校验和 = "f4e35ee24d024924198b74c723fa43d78b58abdc8a70b13948f9579ddc55ff0a"
+大小 = 4254720
