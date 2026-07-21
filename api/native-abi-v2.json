@@ -1,0 +1,219 @@
+{
+  "schema": 1,
+  "contract": "yanxu-platform-native-abi-v2",
+  "host": {
+    "minimum_yanxu": "1.1.7",
+    "reference_tag": "v1.1.7",
+    "reference_tag_object": "7bfac5b88cb6c1e99502f9b0a1af2ebf44099398",
+    "reference_commit": "7d0e8b2b7bdd1125a7d271bce690ab854c79c31c"
+  },
+  "data_model": {
+    "pointer_width": 64,
+    "size_t_width": 64,
+    "endianness": "little"
+  },
+  "abi": {
+    "version": 2,
+    "calling_convention": "C",
+    "entry_symbol": "yanxu_native_module_v2",
+    "status": { "ok": 0, "error": 1 },
+    "aliases": {
+      "YanxuCallbackHandleV2": "uint64_t",
+      "YanxuResourceHandleV2": "uint64_t"
+    },
+    "value_kinds": [
+      { "id": 0, "name": "null" },
+      { "id": 1, "name": "bool" },
+      { "id": 2, "name": "integer" },
+      { "id": 3, "name": "number" },
+      { "id": 4, "name": "string" },
+      { "id": 5, "name": "bytes" },
+      { "id": 6, "name": "array" },
+      { "id": 7, "name": "map" },
+      { "id": 8, "name": "resource" },
+      { "id": 9, "name": "callback" },
+      { "id": 10, "name": "error" }
+    ],
+    "value_flags": { "true": 1, "resource_handle": 2 },
+    "signatures": [
+      { "name": "YanxuNativeDropResourceV2", "declaration": "void (*)(void *)" },
+      { "name": "YanxuCallbackRetainV2", "declaration": "int32_t (*)(void *, uint64_t)" },
+      { "name": "YanxuCallbackReleaseV2", "declaration": "int32_t (*)(void *, uint64_t)" },
+      { "name": "YanxuCallbackPostV2", "declaration": "int32_t (*)(void *, uint64_t, const YanxuValueV2 *, size_t, YanxuNativeErrorV2 *)" },
+      { "name": "YanxuHostWakeV2", "declaration": "void (*)(void *)" },
+      { "name": "YanxuHostPumpV2", "declaration": "int32_t (*)(void *, size_t, YanxuNativeErrorV2 *)" },
+      { "name": "YanxuHostPermissionV2", "declaration": "int32_t (*)(void *, const uint8_t *, size_t)" },
+      { "name": "YanxuHostResourceGetV2", "declaration": "int32_t (*)(void *, uint64_t, void **)" },
+      { "name": "YanxuNativeFunctionPointerV2", "declaration": "int32_t (*)(void *, const YanxuValueV2 *, size_t, const YanxuNativeHostV2 *, YanxuValueV2 *, YanxuNativeErrorV2 *)" },
+      { "name": "YanxuNativeFreeValueV2", "declaration": "void (*)(YanxuValueV2 *)" },
+      { "name": "YanxuNativeModuleEntryV2", "declaration": "const YanxuNativeModuleV2 *(*)(void)" }
+    ],
+    "layouts": [
+      {
+        "name": "YanxuValueDataV2",
+        "size": 8,
+        "align": 8,
+        "fields": [
+          { "name": "integer", "type": "int64_t", "offset": 0 },
+          { "name": "number", "type": "double", "offset": 0 },
+          { "name": "bytes", "type": "const uint8_t *", "offset": 0 },
+          { "name": "items", "type": "const YanxuValueV2 *", "offset": 0 },
+          { "name": "resource", "type": "YanxuNativeResourceV2 *", "offset": 0 },
+          { "name": "handle", "type": "uint64_t", "offset": 0 }
+        ]
+      },
+      {
+        "name": "YanxuValueV2",
+        "size": 24,
+        "align": 8,
+        "fields": [
+          { "name": "kind", "type": "uint32_t", "offset": 0 },
+          { "name": "flags", "type": "uint32_t", "offset": 4 },
+          { "name": "length", "type": "uint64_t", "offset": 8 },
+          { "name": "value", "type": "YanxuValueDataV2", "offset": 16 }
+        ]
+      },
+      {
+        "name": "YanxuNativeErrorV2",
+        "size": 32,
+        "align": 8,
+        "fields": [
+          { "name": "code", "type": "const uint8_t *", "offset": 0 },
+          { "name": "code_length", "type": "size_t", "offset": 8 },
+          { "name": "message", "type": "const uint8_t *", "offset": 16 },
+          { "name": "message_length", "type": "size_t", "offset": 24 }
+        ]
+      },
+      {
+        "name": "YanxuNativeResourceV2",
+        "size": 48,
+        "align": 8,
+        "fields": [
+          { "name": "struct_size", "type": "size_t", "offset": 0 },
+          { "name": "resource", "type": "void *", "offset": 8 },
+          { "name": "type_name", "type": "const uint8_t *", "offset": 16 },
+          { "name": "type_name_length", "type": "size_t", "offset": 24 },
+          { "name": "parent", "type": "YanxuResourceHandleV2", "offset": 32 },
+          { "name": "drop_resource", "type": "YanxuNativeDropResourceV2", "offset": 40 }
+        ]
+      },
+      {
+        "name": "YanxuNativeHostV2",
+        "size": 96,
+        "align": 8,
+        "fields": [
+          { "name": "abi_version", "type": "uint32_t", "offset": 0 },
+          { "name": "struct_size", "type": "size_t", "offset": 8 },
+          { "name": "context", "type": "void *", "offset": 16 },
+          { "name": "callback_retain", "type": "YanxuCallbackRetainV2", "offset": 24 },
+          { "name": "callback_release", "type": "YanxuCallbackReleaseV2", "offset": 32 },
+          { "name": "callback_post", "type": "YanxuCallbackPostV2", "offset": 40 },
+          { "name": "wake", "type": "YanxuHostWakeV2", "offset": 48 },
+          { "name": "pump", "type": "YanxuHostPumpV2", "offset": 56 },
+          { "name": "has_permission", "type": "YanxuHostPermissionV2", "offset": 64 },
+          { "name": "resource_get", "type": "YanxuHostResourceGetV2", "offset": 72 },
+          { "name": "event_loop_id", "type": "uint64_t", "offset": 80 },
+          { "name": "owner_thread_token", "type": "uint64_t", "offset": 88 }
+        ]
+      },
+      {
+        "name": "YanxuNativeFunctionV2",
+        "size": 32,
+        "align": 8,
+        "fields": [
+          { "name": "name", "type": "const uint8_t *", "offset": 0 },
+          { "name": "name_length", "type": "size_t", "offset": 8 },
+          { "name": "context", "type": "void *", "offset": 16 },
+          { "name": "call", "type": "YanxuNativeFunctionPointerV2", "offset": 24 }
+        ]
+      },
+      {
+        "name": "YanxuNativeConstantV2",
+        "size": 24,
+        "align": 8,
+        "fields": [
+          { "name": "name", "type": "const uint8_t *", "offset": 0 },
+          { "name": "name_length", "type": "size_t", "offset": 8 },
+          { "name": "value", "type": "const YanxuValueV2 *", "offset": 16 }
+        ]
+      },
+      {
+        "name": "YanxuNativeModuleV2",
+        "size": 104,
+        "align": 8,
+        "fields": [
+          { "name": "abi_version", "type": "uint32_t", "offset": 0 },
+          { "name": "struct_size", "type": "size_t", "offset": 8 },
+          { "name": "name", "type": "const uint8_t *", "offset": 16 },
+          { "name": "name_length", "type": "size_t", "offset": 24 },
+          { "name": "functions", "type": "const YanxuNativeFunctionV2 *", "offset": 32 },
+          { "name": "function_count", "type": "size_t", "offset": 40 },
+          { "name": "constants", "type": "const YanxuNativeConstantV2 *", "offset": 48 },
+          { "name": "constant_count", "type": "size_t", "offset": 56 },
+          { "name": "resource_types", "type": "const uint8_t *const *", "offset": 64 },
+          { "name": "resource_type_lengths", "type": "const size_t *", "offset": 72 },
+          { "name": "resource_type_count", "type": "size_t", "offset": 80 },
+          { "name": "free_value", "type": "YanxuNativeFreeValueV2", "offset": 88 },
+          { "name": "capabilities", "type": "uint64_t", "offset": 96 }
+        ]
+      }
+    ]
+  },
+  "module": {
+    "name": "yanxu-platform",
+    "struct_size": 104,
+    "capabilities": 255,
+    "constant_count": 0,
+    "free_value": true,
+    "functions": [
+      { "id": 1, "name": "协议查询", "call": true },
+      { "id": 2, "name": "能力查询", "call": true },
+      { "id": 3, "name": "应用创建", "call": true },
+      { "id": 4, "name": "窗口创建", "call": true },
+      { "id": 5, "name": "窗口命令", "call": true },
+      { "id": 6, "name": "窗口查询", "call": true },
+      { "id": 7, "name": "事件冲刷", "call": true },
+      { "id": 8, "name": "帧提交", "call": true },
+      { "id": 9, "name": "绘制解码", "call": true },
+      { "id": 10, "name": "单调时间", "call": true },
+      { "id": 11, "name": "关闭", "call": true },
+      { "id": 12, "name": "调试快照", "call": true },
+      { "id": 13, "name": "字体枚举", "call": true },
+      { "id": 14, "name": "字体匹配", "call": true },
+      { "id": 15, "name": "字体加载", "call": true },
+      { "id": 16, "name": "文字整形", "call": true },
+      { "id": 17, "name": "文字测量", "call": true },
+      { "id": 18, "name": "文字命中", "call": true },
+      { "id": 19, "name": "计时器创建", "call": true },
+      { "id": 20, "name": "计时器取消", "call": true },
+      { "id": 21, "name": "剪贴板读取", "call": true },
+      { "id": 22, "name": "剪贴板写入", "call": true },
+      { "id": 23, "name": "文件对话框", "call": true },
+      { "id": 24, "name": "图片加载", "call": true },
+      { "id": 25, "name": "图片查询", "call": true },
+      { "id": 26, "name": "输入法配置", "call": true },
+      { "id": 27, "name": "光标设置", "call": true },
+      { "id": 28, "name": "显示器查询", "call": true },
+      { "id": 29, "name": "主题查询", "call": true },
+      { "id": 30, "name": "应用运行", "call": true },
+      { "id": 31, "name": "应用退出", "call": true },
+      { "id": 32, "name": "事件唤醒", "call": true },
+      { "id": 33, "name": "计时器查询", "call": true },
+      { "id": 34, "name": "绘制编码", "call": true },
+      { "id": 35, "name": "剪贴板读取图片", "call": true },
+      { "id": 36, "name": "剪贴板写入图片", "call": true },
+      { "id": 37, "name": "帧提交反馈", "call": true },
+      { "id": 38, "name": "无障碍更新", "call": true },
+      { "id": 39, "name": "无障碍查询", "call": true },
+      { "id": 40, "name": "配额查询", "call": true },
+      { "id": 41, "name": "配额配置", "call": true }
+    ],
+    "resource_types": [
+      "yanxu.platform.application",
+      "yanxu.platform.window",
+      "yanxu.platform.timer",
+      "yanxu.platform.image",
+      "yanxu.platform.font"
+    ]
+  }
+}

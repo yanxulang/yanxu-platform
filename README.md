@@ -78,7 +78,8 @@ cargo test --manifest-path yanxu-platform/Cargo.toml --workspace --all-targets -
   [绘制协议](docs/DRAW_PROTOCOL.md)和[文字/IME](docs/TEXT_AND_IME.md)
 - [资源生命周期](docs/RESOURCE_LIFETIME.md)、[线程模型](docs/THREADING_MODEL.md)、
   [Release 性能预算](docs/PERFORMANCE_BUDGET.md)与[兼容政策](docs/COMPATIBILITY.md)
-- [后端贡献](docs/BACKEND_GUIDE.md)、[打包发布](docs/PACKAGING.md)和[生成的 API 参考](docs/API.md)
+- [后端贡献](docs/BACKEND_GUIDE.md)、[打包发布](docs/PACKAGING.md)、
+  [原生 ABI v2 冻结](docs/NATIVE_ABI_V2.md)和[生成的 API 参考](docs/API.md)
 - [第三方许可与安全审计](docs/THIRD_PARTY.md)、[原生制品来源](docs/ARTIFACT_PROVENANCE.md)
 
 架构决策记录位于 `docs/ADR-001` 至 `ADR-004`。

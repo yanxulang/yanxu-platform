@@ -7,6 +7,8 @@ pub mod abi;
 pub mod accessibility;
 pub mod backend;
 pub mod bridge;
+#[cfg(test)]
+mod contract_snapshot;
 pub mod data;
 pub mod draw;
 pub mod event;
