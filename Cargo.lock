@@ -3079,7 +3079,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "yanxu-platform-native"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",

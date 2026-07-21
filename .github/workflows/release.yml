@@ -29,9 +29,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
           TAG: ${{ inputs.tag }}
+          EXPECTED_TAG: v1.0.0
         shell: bash
         run: |
           set -euo pipefail
+          test "$TAG" = "$EXPECTED_TAG"
+          grep -Fx '版本 = "1.0.0"' 言序.toml
           test "$(gh run view "$CI_RUN_ID" --json conclusion --jq .conclusion)" = success
           test "$(gh run view "$CI_RUN_ID" --json workflowName --jq .workflowName)" = CI
           test "$(gh run view "$CI_RUN_ID" --json headSha --jq .headSha)" = "$(git rev-list -n 1 "$TAG")"
@@ -47,17 +50,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          (cd release && sha256sum --check yanxu-platform-0.9.0-six-targets.sha256)
+          (cd release && sha256sum --check yanxu-platform-1.0.0-six-targets.sha256)
           jq -e \
-            '.schema == 1 and .package_version == "0.9.0" and
+            '.schema == 1 and .package_version == "1.0.0" and
              .profile == "release" and .os == "linux" and .arch == "x86_64" and
              .passed == true and (.cases | length == 4) and
              all(.cases[]; .passed == true)' \
-            release/yanxu-platform-0.9.0-performance.json
+            release/yanxu-platform-1.0.0-performance.json
           gh release create "$TAG" \
-            release/yanxu-platform-0.9.0-six-targets.tar.gz \
-            release/yanxu-platform-0.9.0-six-targets.sha256 \
-            release/yanxu-platform-0.9.0.toml \
-            release/yanxu-platform-0.9.0-performance.json \
-            --verify-tag --title "言台 0.9.0" \
-            --notes-file docs/RELEASE_NOTES_0.9.0.md
+            release/yanxu-platform-1.0.0-six-targets.tar.gz \
+            release/yanxu-platform-1.0.0-six-targets.sha256 \
+            release/yanxu-platform-1.0.0.toml \
+            release/yanxu-platform-1.0.0-performance.json \
+            --verify-tag --title "言台 1.0.0" \
+            --notes-file docs/RELEASE_NOTES_1.0.0.md

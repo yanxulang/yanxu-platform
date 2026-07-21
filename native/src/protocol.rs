@@ -14,9 +14,15 @@ pub const MAX_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COMMANDS: usize = 65_536;
 pub const MAX_COMMAND_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
+pub const COMMAND_ALIGNMENT_BYTES: usize = 4;
+pub const PATH_MOVE: u8 = 1;
+pub const PATH_LINE: u8 = 2;
+pub const PATH_QUADRATIC: u8 = 3;
+pub const PATH_CUBIC: u8 = 4;
+pub const PATH_CLOSE: u8 = 5;
 
-const FRAME_HEADER_BYTES: usize = 16;
-const COMMAND_HEADER_BYTES: usize = 8;
+pub(crate) const FRAME_HEADER_BYTES: usize = 16;
+pub(crate) const COMMAND_HEADER_BYTES: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {
@@ -357,7 +363,9 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, ProtocolError> {
 }
 
 fn align4(value: usize) -> Option<usize> {
-    value.checked_add(3).map(|aligned| aligned & !3)
+    value
+        .checked_add(COMMAND_ALIGNMENT_BYTES - 1)
+        .map(|aligned| aligned & !(COMMAND_ALIGNMENT_BYTES - 1))
 }
 
 #[cfg(test)]

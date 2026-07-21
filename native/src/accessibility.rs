@@ -14,7 +14,7 @@ pub const MAX_SEMANTIC_CHILDREN: usize = 4_096;
 pub const MAX_SEMANTIC_ACTIONS: usize = 16;
 pub const MAX_SEMANTIC_NODE_TEXT_BYTES: usize = 65_536;
 pub const MAX_SEMANTIC_TEXT_BYTES: usize = 4 * 1024 * 1024;
-const MAX_SEMANTIC_COORDINATE: f64 = 1_000_000.0;
+pub(crate) const MAX_SEMANTIC_COORDINATE: f64 = 1_000_000.0;
 
 pub const SEMANTIC_ROLES: &[&str] = &[
     "窗口",

@@ -11,14 +11,14 @@
 言序应用 → yanxu-ui（言界）→ yanxu-platform（言台）→ 原生平台后端 → 操作系统
 ```
 
-当前版本为 `0.9.0`，最低要求言序 `1.1.7`。原生后端采用 ABI v2，窗口层使用
+当前版本为 `1.0.0`，支持言序 `>=1.1.7, <2.0.0`。原生后端采用 ABI v2，窗口层使用
 `winit`，CPU 表面使用 `softbuffer`，二维栅格化使用 `tiny-skia`，复杂文字使用
 `cosmic-text`。依赖版本、许可证与选型理由会固定在 `docs/` 中。
 
-0.9.0 在既有六目标原生窗口、无障碍桥、应用配额和可控关闭之上建立生产稳定性门禁：
-绘制协议与 ABI 值有版本化畸形语料，事件背压和完整资源生命周期有长序列浸泡证明，固定
-Linux x86-64 运行器使用 Release 长样本、中位数与 MAD 执行性能预算。供应链审计不再
-忽略停止维护的字体解析依赖，六目标候选必须同时等待零例外公告/许可/来源检查和性能报告。
+1.0.0 将言序公开 API、原生 ABI v2、四套机器协议和 70 个运行时错误码冻结为 1.x
+兼容契约。六目标从真实描述符和执行路径重建机器快照，独立 Rust 1.92.0 作业验证最低
+工具链，绘制与 ABI 畸形语料、长序列浸泡、Release 性能预算和零例外供应链审计共同构成
+生产发布门禁。0.9.0 使用者无需修改源码即可升级；更早版本见迁移指南。
 
 ## 安装依赖
 
@@ -76,9 +76,13 @@ cargo test --manifest-path yanxu-platform/Cargo.toml --workspace --all-targets -
 - [实际架构](docs/ARCHITECTURE.md)与[平台 API](docs/PLATFORM_API.md)
 - [事件协议](docs/EVENT_PROTOCOL.md)、[无障碍协议](docs/ACCESSIBILITY_PROTOCOL.md)、
   [绘制协议](docs/DRAW_PROTOCOL.md)和[文字/IME](docs/TEXT_AND_IME.md)
+- [1.0 协议冻结](docs/PROTOCOL_CONTRACT_1_0.md)
+- [1.0 稳定错误码](docs/ERROR_CODES_1_0.md)
+- [0.x 到 1.0 迁移](docs/MIGRATION_0_X_TO_1_0.md)
 - [资源生命周期](docs/RESOURCE_LIFETIME.md)、[线程模型](docs/THREADING_MODEL.md)、
   [Release 性能预算](docs/PERFORMANCE_BUDGET.md)与[兼容政策](docs/COMPATIBILITY.md)
-- [后端贡献](docs/BACKEND_GUIDE.md)、[打包发布](docs/PACKAGING.md)和[生成的 API 参考](docs/API.md)
+- [后端贡献](docs/BACKEND_GUIDE.md)、[打包发布](docs/PACKAGING.md)、
+  [原生 ABI v2 冻结](docs/NATIVE_ABI_V2.md)和[生成的 API 参考](docs/API.md)
 - [第三方许可与安全审计](docs/THIRD_PARTY.md)、[原生制品来源](docs/ARTIFACT_PROVENANCE.md)
 
 架构决策记录位于 `docs/ADR-001` 至 `ADR-004`。

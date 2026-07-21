@@ -52,6 +52,49 @@ pub enum EventKind {
     Timer,
 }
 
+#[cfg(test)]
+pub(crate) const EVENT_KINDS: &[EventKind] = &[
+    EventKind::ApplicationStarted,
+    EventKind::ApplicationActivated,
+    EventKind::ApplicationDeactivated,
+    EventKind::ExitRequested,
+    EventKind::WindowShown,
+    EventKind::WindowHidden,
+    EventKind::WindowCloseRequested,
+    EventKind::WindowClosed,
+    EventKind::WindowMoved,
+    EventKind::WindowResized,
+    EventKind::DpiChanged,
+    EventKind::WindowFocused,
+    EventKind::WindowUnfocused,
+    EventKind::RedrawRequested,
+    EventKind::FramePresented,
+    EventKind::AccessibilityFocusRequested,
+    EventKind::AccessibilityActionRequested,
+    EventKind::PointerEntered,
+    EventKind::PointerLeft,
+    EventKind::PointerMoved,
+    EventKind::PointerDown,
+    EventKind::PointerUp,
+    EventKind::PointerCancelled,
+    EventKind::Wheel,
+    EventKind::Gesture,
+    EventKind::KeyDown,
+    EventKind::KeyUp,
+    EventKind::TextInput,
+    EventKind::ImeStarted,
+    EventKind::ImeUpdated,
+    EventKind::ImeCommitted,
+    EventKind::ImeCancelled,
+    EventKind::FileEntered,
+    EventKind::FileHovered,
+    EventKind::FileLeft,
+    EventKind::FileDropped,
+    EventKind::ThemeChanged,
+    EventKind::MonitorsChanged,
+    EventKind::Timer,
+];
+
 impl EventKind {
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -95,6 +138,16 @@ impl EventKind {
             Self::ThemeChanged => "系统主题变化",
             Self::MonitorsChanged => "显示器变化",
             Self::Timer => "计时器",
+        }
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) const fn coalescing_name(self) -> &'static str {
+        match self.coalescing() {
+            Coalescing::Never => "never",
+            Coalescing::Latest => "latest",
+            Coalescing::AccumulateWheel => "accumulate-wheel",
         }
     }
 
@@ -378,49 +431,12 @@ mod tests {
 
     #[test]
     fn includes_every_required_event_name() {
-        let kinds = [
-            EventKind::ApplicationStarted,
-            EventKind::ApplicationActivated,
-            EventKind::ApplicationDeactivated,
-            EventKind::ExitRequested,
-            EventKind::WindowShown,
-            EventKind::WindowHidden,
-            EventKind::WindowCloseRequested,
-            EventKind::WindowClosed,
-            EventKind::WindowMoved,
-            EventKind::WindowResized,
-            EventKind::DpiChanged,
-            EventKind::WindowFocused,
-            EventKind::WindowUnfocused,
-            EventKind::RedrawRequested,
-            EventKind::FramePresented,
-            EventKind::AccessibilityFocusRequested,
-            EventKind::AccessibilityActionRequested,
-            EventKind::PointerEntered,
-            EventKind::PointerLeft,
-            EventKind::PointerMoved,
-            EventKind::PointerDown,
-            EventKind::PointerUp,
-            EventKind::PointerCancelled,
-            EventKind::Wheel,
-            EventKind::Gesture,
-            EventKind::KeyDown,
-            EventKind::KeyUp,
-            EventKind::TextInput,
-            EventKind::ImeStarted,
-            EventKind::ImeUpdated,
-            EventKind::ImeCommitted,
-            EventKind::ImeCancelled,
-            EventKind::FileEntered,
-            EventKind::FileHovered,
-            EventKind::FileLeft,
-            EventKind::FileDropped,
-            EventKind::ThemeChanged,
-            EventKind::MonitorsChanged,
-            EventKind::Timer,
-        ];
-        assert_eq!(kinds.len(), 39);
-        assert!(kinds.iter().all(|kind| !kind.name().is_empty()));
+        assert_eq!(EVENT_KINDS.len(), 39);
+        let names = EVENT_KINDS
+            .iter()
+            .map(|kind| kind.name())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(names.len(), EVENT_KINDS.len());
     }
 
     #[test]

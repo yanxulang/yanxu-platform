@@ -168,6 +168,28 @@ jobs:
           cargo deny check advisories licenses sources
           cargo audit --file Cargo.lock --deny warnings
 
+  minimum-rust:
+    name: Rust 1.92 最低工具链
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: 安装 Linux 图形开发库
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev
+      - name: 安装并核对最低 Rust 工具链
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal \
+            --component rustfmt --component clippy
+          test "$(rustc +1.92.0 --version | awk '{print $2}')" = 1.92.0
+      - name: 最低版本格式、测试与 Clippy
+        run: |
+          cargo +1.92.0 fmt --all -- --check
+          cargo +1.92.0 test --workspace --all-targets --locked
+          cargo +1.92.0 clippy --workspace --all-targets --locked -- -D warnings
+
   performance-budget:
     name: Release 性能预算
     runs-on: ubuntu-24.04
@@ -199,7 +221,7 @@ jobs:
 
   assemble:
     name: 汇总六目标正式包候选
-    needs: [native, dependency-policy, performance-budget]
+    needs: [native, minimum-rust, dependency-policy, performance-budget]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -212,30 +234,30 @@ jobs:
         run: |
           set -euo pipefail
           sh scripts/verify-release-source.sh
-          grep -F '29808592375' docs/ARTIFACT_PROVENANCE.md
-          grep -F '3d1dae4b4546762902e99d37b517f383c8a7a521' docs/ARTIFACT_PROVENANCE.md
+          grep -F '29816339755' docs/ARTIFACT_PROVENANCE.md
+          grep -F '36e70610536791d12afe70abdfb0316d4b002c4a' docs/ARTIFACT_PROVENANCE.md
           jq -e \
-            '.schema == 1 and .package_version == "0.9.0" and
+            '.schema == 1 and .package_version == "1.0.0" and
              .profile == "release" and .os == "linux" and .arch == "x86_64" and
              .passed == true and (.cases | length == 4) and
              all(.cases[]; .passed == true)' \
             performance/yanxu-platform-performance-budget.json
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
-            -czf yanxu-platform-0.9.0-six-targets.tar.gz \
+            -czf yanxu-platform-1.0.0-six-targets.tar.gz \
             .gitattributes .github .gitignore src native vendor api docs examples tests dist scripts \
             Cargo.toml Cargo.lock deny.toml 言序.toml 言序.toml.in \
             README.md CHANGELOG.md SECURITY.md LICENSE-MIT LICENSE-APACHE
-          sha256sum yanxu-platform-0.9.0-six-targets.tar.gz \
-            > yanxu-platform-0.9.0-six-targets.sha256
-          cp 言序.toml yanxu-platform-0.9.0.toml
+          sha256sum yanxu-platform-1.0.0-six-targets.tar.gz \
+            > yanxu-platform-1.0.0-six-targets.sha256
+          cp 言序.toml yanxu-platform-1.0.0.toml
           cp performance/yanxu-platform-performance-budget.json \
-            yanxu-platform-0.9.0-performance.json
+            yanxu-platform-1.0.0-performance.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: yanxu-platform-six-targets
           path: |
-            yanxu-platform-0.9.0-six-targets.tar.gz
-            yanxu-platform-0.9.0-six-targets.sha256
-            yanxu-platform-0.9.0.toml
-            yanxu-platform-0.9.0-performance.json
+            yanxu-platform-1.0.0-six-targets.tar.gz
+            yanxu-platform-1.0.0-six-targets.sha256
+            yanxu-platform-1.0.0.toml
+            yanxu-platform-1.0.0-performance.json
           if-no-files-found: error

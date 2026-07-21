@@ -1,6 +1,6 @@
 # 平台后端贡献指南
 
-0.9.0 的 Windows、macOS、Wayland 与 X11 支持共享 `winit`/`softbuffer` 后端，UIA、
+1.0.0 的 Windows、macOS、Wayland 与 X11 支持共享 `winit`/`softbuffer` 后端，UIA、
 NSAccessibility 与 AT-SPI 共享 AccessKit 语义层。新增系统集成应先扩展这两条统一路径；
 只有上游无法表达所需原语时才增加小型 `cfg(target_os)` 适配器。
 

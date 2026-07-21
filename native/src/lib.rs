@@ -7,12 +7,18 @@ pub mod abi;
 pub mod accessibility;
 pub mod backend;
 pub mod bridge;
+#[cfg(test)]
+mod contract_snapshot;
 pub mod data;
 pub mod draw;
+#[cfg(test)]
+mod error_snapshot;
 pub mod event;
 pub mod model;
 mod native_accessibility;
 pub mod protocol;
+#[cfg(test)]
+mod protocol_snapshot;
 pub mod render;
 pub mod sync;
 pub mod text;

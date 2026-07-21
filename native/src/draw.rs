@@ -9,8 +9,36 @@ use crate::render::{
 };
 use std::collections::BTreeMap;
 
-const MAX_PATH_SEGMENTS: usize = u16::MAX as usize;
-const MAX_GLYPHS_PER_RUN: usize = 262_144;
+pub(crate) const MAX_PATH_SEGMENTS: usize = u16::MAX as usize;
+pub(crate) const MAX_GLYPHS_PER_RUN: usize = 262_144;
+#[cfg(test)]
+pub(crate) const DRAW_OPERATIONS: &[(u16, &str, u16)] = &[
+    (OP_CLEAR, "清空", 0),
+    (OP_SAVE, "保存", 0),
+    (OP_RESTORE, "恢复", 0),
+    (OP_CLIP_RECT, "裁剪矩形", 0),
+    (OP_TRANSFORM, "变换", 0),
+    (OP_LAYER, "图层", 0),
+    (OP_FILL_RECT, "填充矩形", 0),
+    (OP_STROKE_RECT, "描边矩形", 0),
+    (OP_ROUNDED_RECT, "圆角矩形", 0),
+    (OP_LINE, "直线", 0),
+    (OP_CIRCLE, "圆形", 0),
+    (OP_SHADOW, "阴影", 0),
+    (OP_TEXT, "文字", 0),
+    (OP_IMAGE, "图片", 0),
+    (OP_PATH, "路径", 0),
+    (OP_TEXT_STYLE, "带样式文字", 1),
+    (OP_GLYPH_RUN, "字形序列", 1),
+];
+#[cfg(test)]
+pub(crate) const PATH_OPERATIONS: &[(u8, &str)] = &[
+    (protocol::PATH_MOVE, "移动"),
+    (protocol::PATH_LINE, "直线"),
+    (protocol::PATH_QUADRATIC, "二次曲线"),
+    (protocol::PATH_CUBIC, "三次曲线"),
+    (protocol::PATH_CLOSE, "闭合"),
+];
 
 pub fn encode_commands(value: &Data) -> Result<Vec<u8>, &'static str> {
     let commands = array(value)?;
@@ -190,25 +218,25 @@ fn write_path(
         let segment = map(segment)?;
         match required_text(segment, "类型")? {
             "移动" => {
-                writer.u8(1);
+                writer.u8(protocol::PATH_MOVE);
                 write_float_array(writer, required(segment, "点")?, 2)?;
             }
             "直线" => {
-                writer.u8(2);
+                writer.u8(protocol::PATH_LINE);
                 write_float_array(writer, required(segment, "点")?, 2)?;
             }
             "二次曲线" => {
-                writer.u8(3);
+                writer.u8(protocol::PATH_QUADRATIC);
                 write_float_array(writer, required(segment, "控制点")?, 2)?;
                 write_float_array(writer, required(segment, "终点")?, 2)?;
             }
             "三次曲线" => {
-                writer.u8(4);
+                writer.u8(protocol::PATH_CUBIC);
                 write_float_array(writer, required(segment, "控制点一")?, 2)?;
                 write_float_array(writer, required(segment, "控制点二")?, 2)?;
                 write_float_array(writer, required(segment, "终点")?, 2)?;
             }
-            "闭合" => writer.u8(5),
+            "闭合" => writer.u8(protocol::PATH_CLOSE),
             _ => return Err("PLATFORM_DRAW_VALUE"),
         }
     }
