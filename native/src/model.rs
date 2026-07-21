@@ -600,21 +600,12 @@ impl Model {
 
     pub fn create(&mut self, parent: Option<u64>, state: ResourceState) -> Result<u64, ModelError> {
         let kind = state.kind();
-        if let Some(parent_id) = parent {
-            let parent_node = self
-                .resources
-                .get(&parent_id)
-                .ok_or(ModelError::Missing(parent_id))?;
-            if !allowed_parent(parent_node.state.kind(), kind) {
-                return Err(ModelError::Parent(parent_id));
-            }
-        } else if kind != ResourceKind::Application {
-            return Err(ModelError::Parent(0));
-        }
-        let added_usage = state.usage();
-        let next_usage = self.checked_resource_usage(added_usage)?;
+        let next_usage = self.prepare_create(parent, &state)?;
         let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).ok_or(ModelError::Overflow)?;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("preflight resource identifier must remain valid");
         self.resources.insert(
             id,
             ResourceNode {
@@ -642,6 +633,37 @@ impl Model {
             .max(self.resource_metrics.live);
         self.resource_metrics.created = self.resource_metrics.created.saturating_add(1);
         Ok(id)
+    }
+
+    pub fn preflight_create(
+        &mut self,
+        parent: Option<u64>,
+        state: &ResourceState,
+    ) -> Result<(), ModelError> {
+        self.prepare_create(parent, state).map(drop)
+    }
+
+    fn prepare_create(
+        &mut self,
+        parent: Option<u64>,
+        state: &ResourceState,
+    ) -> Result<ResourceUsage, ModelError> {
+        let kind = state.kind();
+        if let Some(parent_id) = parent {
+            let parent_node = self
+                .resources
+                .get(&parent_id)
+                .ok_or(ModelError::Missing(parent_id))?;
+            if !allowed_parent(parent_node.state.kind(), kind) {
+                return Err(ModelError::Parent(parent_id));
+            }
+        } else if kind != ResourceKind::Application {
+            return Err(ModelError::Parent(0));
+        }
+        let added_usage = state.usage();
+        let next_usage = self.checked_resource_usage(added_usage)?;
+        self.next_id.checked_add(1).ok_or(ModelError::Overflow)?;
+        Ok(next_usage)
     }
 
     pub fn create_with_events(

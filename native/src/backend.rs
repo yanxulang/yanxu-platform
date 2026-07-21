@@ -556,23 +556,11 @@ pub unsafe fn call(
             let (parent_handle, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
             let font_bytes = bytes(&arguments[1])?.to_vec();
-            let families = application
-                .text
-                .lock_recover()
-                .load_font(font_bytes.clone())
-                .map_err(text_error_code)?;
-            let family = families.first().cloned().ok_or("PLATFORM_FONT_INVALID")?;
-            let id = application
-                .model
-                .lock_recover()
-                .create(
-                    Some(application.id),
-                    ResourceState::Font {
-                        family,
-                        bytes: Some(font_bytes),
-                    },
-                )
-                .map_err(model_error_code)?;
+            let mut model = application.model.lock_recover();
+            let id = create_loaded_font(&mut model, application.id, font_bytes, |font_bytes| {
+                application.text.lock_recover().load_font(font_bytes)
+            })?;
+            drop(model);
             Ok(resource_output(
                 application.model.clone(),
                 application.text.clone(),
@@ -1420,6 +1408,40 @@ fn configure_resource_limits_from_data(
     };
     model
         .configure_resource_limits(limits)
+        .map_err(model_error_code)
+}
+
+fn create_loaded_font(
+    model: &mut Model,
+    application_id: u64,
+    font_bytes: Vec<u8>,
+    load: impl FnOnce(Vec<u8>) -> Result<Vec<String>, TextError>,
+) -> Result<u64, &'static str> {
+    let mut state = ResourceState::Font {
+        family: String::new(),
+        bytes: Some(font_bytes),
+    };
+    model
+        .preflight_create(Some(application_id), &state)
+        .map_err(model_error_code)?;
+    let loader_bytes = match &state {
+        ResourceState::Font {
+            bytes: Some(bytes), ..
+        } => bytes.clone(),
+        _ => unreachable!("font resource must retain its source bytes"),
+    };
+    let families = load(loader_bytes).map_err(text_error_code)?;
+    let family = families.first().cloned().ok_or("PLATFORM_FONT_INVALID")?;
+    let ResourceState::Font {
+        family: state_family,
+        ..
+    } = &mut state
+    else {
+        unreachable!("font resource state changed during loading")
+    };
+    *state_family = family;
+    model
+        .create(Some(application_id), state)
         .map_err(model_error_code)
 }
 
@@ -2368,6 +2390,59 @@ mod tests {
         assert_eq!(model.quota_metrics().rejected, 3);
         assert_eq!(model.quota_metrics().configuration_rejected, 2);
         assert_eq!(model.quota_metrics().locked_rejected, 1);
+    }
+
+    #[test]
+    fn font_quota_preflight_runs_before_the_text_loader() {
+        let limits = ResourceLimits {
+            resources: 2,
+            fonts: 0,
+            font_bytes: 16,
+            ..ResourceLimits::default()
+        };
+        let mut model = Model::with_limits(limits);
+        let application = model
+            .create(
+                None,
+                ResourceState::Application {
+                    name: "测试".to_owned(),
+                    exit_requested: false,
+                },
+            )
+            .unwrap();
+        let mut loader_called = false;
+        assert_eq!(
+            create_loaded_font(&mut model, application, vec![1, 2, 3], |_| {
+                loader_called = true;
+                Ok(vec!["测试字体".to_owned()])
+            }),
+            Err("PLATFORM_QUOTA_FONTS")
+        );
+        assert!(!loader_called);
+        assert_eq!(model.count(ResourceKind::Font), 0);
+        assert!(!model.resource_limits_locked());
+        assert_eq!(model.quota_metrics().fonts, 1);
+
+        let mut model = Model::default();
+        let application = model
+            .create(
+                None,
+                ResourceState::Application {
+                    name: "测试".to_owned(),
+                    exit_requested: false,
+                },
+            )
+            .unwrap();
+        let font = create_loaded_font(&mut model, application, vec![4, 5, 6], |bytes| {
+            assert_eq!(bytes, vec![4, 5, 6]);
+            Ok(vec!["测试字体".to_owned()])
+        })
+        .unwrap();
+        let ResourceState::Font { family, bytes } = &model.get(font).unwrap().state else {
+            panic!("font state expected")
+        };
+        assert_eq!(family, "测试字体");
+        assert_eq!(bytes.as_deref(), Some([4, 5, 6].as_slice()));
     }
 
     #[test]
