@@ -16,6 +16,8 @@ pub const MAX_APPLICATION_FONTS: usize = 64;
 pub const MAX_APPLICATION_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_APPLICATION_FONT_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_APPLICATION_FRAME_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_APPLICATION_ACCESSIBILITY_NODES: usize = 65_536;
+pub const MAX_APPLICATION_ACCESSIBILITY_TEXT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
@@ -36,6 +38,8 @@ pub struct ResourceLimits {
     pub image_bytes: usize,
     pub font_bytes: usize,
     pub frame_bytes: usize,
+    pub accessibility_nodes: usize,
+    pub accessibility_text_bytes: usize,
 }
 
 impl Default for ResourceLimits {
@@ -49,6 +53,8 @@ impl Default for ResourceLimits {
             image_bytes: MAX_APPLICATION_IMAGE_BYTES,
             font_bytes: MAX_APPLICATION_FONT_BYTES,
             frame_bytes: MAX_APPLICATION_FRAME_BYTES,
+            accessibility_nodes: MAX_APPLICATION_ACCESSIBILITY_NODES,
+            accessibility_text_bytes: MAX_APPLICATION_ACCESSIBILITY_TEXT_BYTES,
         }
     }
 }
@@ -63,6 +69,8 @@ pub struct ResourceUsage {
     pub image_bytes: usize,
     pub font_bytes: usize,
     pub frame_bytes: usize,
+    pub accessibility_nodes: usize,
+    pub accessibility_text_bytes: usize,
 }
 
 impl ResourceUsage {
@@ -76,6 +84,12 @@ impl ResourceUsage {
             image_bytes: self.image_bytes.checked_add(other.image_bytes)?,
             font_bytes: self.font_bytes.checked_add(other.font_bytes)?,
             frame_bytes: self.frame_bytes.checked_add(other.frame_bytes)?,
+            accessibility_nodes: self
+                .accessibility_nodes
+                .checked_add(other.accessibility_nodes)?,
+            accessibility_text_bytes: self
+                .accessibility_text_bytes
+                .checked_add(other.accessibility_text_bytes)?,
         })
     }
 
@@ -89,6 +103,12 @@ impl ResourceUsage {
             image_bytes: self.image_bytes.checked_sub(other.image_bytes)?,
             font_bytes: self.font_bytes.checked_sub(other.font_bytes)?,
             frame_bytes: self.frame_bytes.checked_sub(other.frame_bytes)?,
+            accessibility_nodes: self
+                .accessibility_nodes
+                .checked_sub(other.accessibility_nodes)?,
+            accessibility_text_bytes: self
+                .accessibility_text_bytes
+                .checked_sub(other.accessibility_text_bytes)?,
         })
     }
 }
@@ -103,6 +123,8 @@ pub enum QuotaKind {
     ImageBytes,
     FontBytes,
     FrameBytes,
+    AccessibilityNodes,
+    AccessibilityTextBytes,
 }
 
 impl QuotaKind {
@@ -117,6 +139,8 @@ impl QuotaKind {
             Self::ImageBytes => "PLATFORM_QUOTA_IMAGE_BYTES",
             Self::FontBytes => "PLATFORM_QUOTA_FONT_BYTES",
             Self::FrameBytes => "PLATFORM_QUOTA_FRAME_BYTES",
+            Self::AccessibilityNodes => "PLATFORM_QUOTA_ACCESSIBILITY_NODES",
+            Self::AccessibilityTextBytes => "PLATFORM_QUOTA_ACCESSIBILITY_TEXT_BYTES",
         }
     }
 
@@ -130,6 +154,8 @@ impl QuotaKind {
             Self::ImageBytes => "图片字节",
             Self::FontBytes => "字体字节",
             Self::FrameBytes => "帧字节",
+            Self::AccessibilityNodes => "无障碍节点",
+            Self::AccessibilityTextBytes => "无障碍文字字节",
         }
     }
 }
@@ -255,6 +281,8 @@ impl ResourceState {
             Self::Window(window) => {
                 usage.windows = 1;
                 usage.frame_bytes = window.frame.len();
+                usage.accessibility_nodes = window.accessibility.node_count();
+                usage.accessibility_text_bytes = window.accessibility.text_bytes();
             }
             Self::Timer(_) => usage.timers = 1,
             Self::Image { rgba, .. } => {
@@ -676,6 +704,16 @@ impl Model {
                 self.resource_limits.frame_bytes,
                 QuotaKind::FrameBytes,
             ),
+            (
+                next.accessibility_nodes,
+                self.resource_limits.accessibility_nodes,
+                QuotaKind::AccessibilityNodes,
+            ),
+            (
+                next.accessibility_text_bytes,
+                self.resource_limits.accessibility_text_bytes,
+                QuotaKind::AccessibilityTextBytes,
+            ),
         ] {
             if usage > limit {
                 return Err(ModelError::Quota(kind));
@@ -776,32 +814,72 @@ impl Model {
         window_id: u64,
         tree: Option<crate::accessibility::SemanticTree>,
     ) -> Result<bool, AccessibilityModelError> {
-        let outcome: Result<_, AccessibilityModelError> = (|| {
-            let node = self.get_mut(window_id)?;
-            let ResourceState::Window(window) = &mut node.state else {
-                return Err(AccessibilityModelError::from(ModelError::Kind(window_id)));
+        let before: Result<_, AccessibilityModelError> = (|| {
+            let node = self.get(window_id)?;
+            let ResourceState::Window(window) = &node.state else {
+                return Err(ModelError::Kind(window_id).into());
             };
-            let before = (
+            Ok((
                 usize::from(window.accessibility.tree().is_some()),
                 window.accessibility.node_count(),
                 window.accessibility.text_bytes(),
-            );
-            let changed = window.accessibility.replace(tree)?;
-            let after = (
-                usize::from(window.accessibility.tree().is_some()),
-                window.accessibility.node_count(),
-                window.accessibility.text_bytes(),
-            );
-            Ok((changed, before, after))
+            ))
         })();
-        let (changed, before, after) = match outcome {
+        let before = match before {
             Ok(value) => value,
             Err(error) => {
                 self.record_accessibility_rejection();
                 return Err(error);
             }
         };
+        let after = (
+            usize::from(tree.is_some()),
+            tree.as_ref().map_or(0, |tree| tree.node_count()),
+            tree.as_ref().map_or(0, |tree| tree.text_bytes()),
+        );
+        let next_nodes = self
+            .resource_usage
+            .accessibility_nodes
+            .checked_sub(before.1)
+            .and_then(|current| current.checked_add(after.1));
+        let next_nodes = match next_nodes {
+            Some(value) if value <= self.resource_limits.accessibility_nodes => value,
+            _ => {
+                self.record_accessibility_rejection();
+                return Err(ModelError::Quota(QuotaKind::AccessibilityNodes).into());
+            }
+        };
+        let next_text_bytes = self
+            .resource_usage
+            .accessibility_text_bytes
+            .checked_sub(before.2)
+            .and_then(|current| current.checked_add(after.2));
+        let next_text_bytes = match next_text_bytes {
+            Some(value) if value <= self.resource_limits.accessibility_text_bytes => value,
+            _ => {
+                self.record_accessibility_rejection();
+                return Err(ModelError::Quota(QuotaKind::AccessibilityTextBytes).into());
+            }
+        };
+        let changed = {
+            let node = self
+                .get_mut(window_id)
+                .expect("validated accessibility window disappeared");
+            let ResourceState::Window(window) = &mut node.state else {
+                unreachable!("validated accessibility resource changed type")
+            };
+            window.accessibility.replace(tree)
+        };
+        let changed = match changed {
+            Ok(value) => value,
+            Err(error) => {
+                self.record_accessibility_rejection();
+                return Err(error.into());
+            }
+        };
         if changed {
+            self.resource_usage.accessibility_nodes = next_nodes;
+            self.resource_usage.accessibility_text_bytes = next_text_bytes;
             let metrics = &mut self.accessibility_metrics;
             metrics.current_trees = metrics
                 .current_trees
@@ -1107,6 +1185,8 @@ mod tests {
             image_bytes: 0,
             font_bytes: 0,
             frame_bytes: 0,
+            accessibility_nodes: 0,
+            accessibility_text_bytes: 0,
         };
         let mut model = Model::with_limits(limits);
         let application = app(&mut model);
@@ -1170,6 +1250,8 @@ mod tests {
             image_bytes: 16,
             font_bytes: 16,
             frame_bytes: 16,
+            accessibility_nodes: 16,
+            accessibility_text_bytes: 16,
         };
         let mut model = Model::with_limits(limits);
         let application = app(&mut model);
@@ -1227,6 +1309,8 @@ mod tests {
             image_bytes: 4,
             font_bytes: 3,
             frame_bytes: 0,
+            accessibility_nodes: 0,
+            accessibility_text_bytes: 0,
         };
         let mut model = Model::with_limits(limits);
         let application = app(&mut model);
@@ -1415,6 +1499,8 @@ mod tests {
             image_bytes: 0,
             font_bytes: 0,
             frame_bytes: 5,
+            accessibility_nodes: 0,
+            accessibility_text_bytes: 0,
         };
         let mut model = Model::with_limits(limits);
         let application = app(&mut model);
@@ -1486,12 +1572,8 @@ mod tests {
                 Data::Array(vec![0.into(), 0.into(), 80.into(), 30.into()]),
             ),
         ]);
-        let ResourceState::Window(state) = &mut model.get_mut(window).unwrap().state else {
-            panic!("window state expected")
-        };
-        state
-            .accessibility
-            .replace(Some(SemanticTree::validate(&tree).unwrap()))
+        model
+            .replace_accessibility(window, Some(SemanticTree::validate(&tree).unwrap()))
             .unwrap();
         model
             .request_accessibility_focus(window, 1, AccessibilitySource::AssistiveTechnology, 2.5)
@@ -1561,12 +1643,8 @@ mod tests {
                 Data::Array(vec![0.into(), 0.into(), 80.into(), 30.into()]),
             ),
         ]);
-        let ResourceState::Window(state) = &mut model.get_mut(window).unwrap().state else {
-            panic!("window state expected")
-        };
-        state
-            .accessibility
-            .replace(Some(SemanticTree::validate(&tree).unwrap()))
+        model
+            .replace_accessibility(window, Some(SemanticTree::validate(&tree).unwrap()))
             .unwrap();
         model
             .request_accessibility_action(
@@ -1671,10 +1749,17 @@ mod tests {
         assert_eq!(metrics.text_bytes_high_watermark, "根内容".len());
         assert_eq!(metrics.updates, 1);
         assert_eq!(metrics.unchanged, 1);
+        assert_eq!(model.resource_usage().accessibility_nodes, 2);
+        assert_eq!(
+            model.resource_usage().accessibility_text_bytes,
+            "根内容".len()
+        );
 
         assert!(model.replace_accessibility(window, None).unwrap());
         assert_eq!(model.accessibility_metrics().current_trees, 0);
         assert_eq!(model.accessibility_metrics().cleared, 1);
+        assert_eq!(model.resource_usage().accessibility_nodes, 0);
+        assert_eq!(model.resource_usage().accessibility_text_bytes, 0);
         assert!(
             model
                 .replace_accessibility(window, Some(SemanticTree::validate(&tree).unwrap()))
@@ -1687,6 +1772,107 @@ mod tests {
         assert_eq!(metrics.current_text_bytes, 0);
         assert_eq!(metrics.nodes_high_watermark, 2);
         assert_eq!(metrics.updates, 3);
+        assert_eq!(model.resource_usage().accessibility_nodes, 0);
+        assert_eq!(model.resource_usage().accessibility_text_bytes, 0);
+    }
+
+    #[test]
+    fn bounds_accessibility_nodes_and_text_across_application_windows() {
+        let limits = ResourceLimits {
+            resources: 3,
+            windows: 2,
+            timers: 0,
+            images: 0,
+            fonts: 0,
+            image_bytes: 0,
+            font_bytes: 0,
+            frame_bytes: 0,
+            accessibility_nodes: 2,
+            accessibility_text_bytes: 5,
+        };
+        let mut model = Model::with_limits(limits);
+        let application = app(&mut model);
+        let first_window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let second_window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        let single = |id, name: &str| {
+            SemanticTree::validate(&Data::map([
+                ("编号", Data::Integer(id)),
+                ("角色", Data::String("文字".to_owned())),
+                ("名称", Data::String(name.to_owned())),
+                (
+                    "边界",
+                    Data::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                ),
+            ]))
+            .unwrap()
+        };
+        let double = SemanticTree::validate(&Data::map([
+            ("编号", Data::Integer(10)),
+            ("角色", Data::String("面板".to_owned())),
+            ("名称", Data::String(String::new())),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+            ),
+            (
+                "子",
+                Data::Array(vec![Data::map([
+                    ("编号", Data::Integer(11)),
+                    ("角色", Data::String("文字".to_owned())),
+                    ("名称", Data::String(String::new())),
+                    (
+                        "边界",
+                        Data::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                    ),
+                ])]),
+            ),
+        ]))
+        .unwrap();
+
+        model
+            .replace_accessibility(first_window, Some(single(1, "甲")))
+            .unwrap();
+        assert_eq!(model.resource_usage().accessibility_nodes, 1);
+        assert_eq!(model.resource_usage().accessibility_text_bytes, 3);
+        assert_eq!(
+            model
+                .replace_accessibility(second_window, Some(single(2, "乙")))
+                .unwrap_err()
+                .code(),
+            "PLATFORM_QUOTA_ACCESSIBILITY_TEXT_BYTES"
+        );
+        assert_eq!(
+            model
+                .replace_accessibility(second_window, Some(double.clone()))
+                .unwrap_err()
+                .code(),
+            "PLATFORM_QUOTA_ACCESSIBILITY_NODES"
+        );
+        let ResourceState::Window(second) = &model.get(second_window).unwrap().state else {
+            panic!("window state expected")
+        };
+        assert_eq!(second.accessibility.revision(), 0);
+        assert!(second.accessibility.tree().is_none());
+        assert_eq!(model.accessibility_metrics().rejected, 2);
+        assert_eq!(model.resource_usage().accessibility_nodes, 1);
+        assert_eq!(model.resource_usage().accessibility_text_bytes, 3);
+
+        model
+            .replace_accessibility(first_window, Some(double))
+            .unwrap();
+        assert_eq!(model.resource_usage().accessibility_nodes, 2);
+        assert_eq!(model.resource_usage().accessibility_text_bytes, 0);
+        model.close(first_window).unwrap();
+        assert_eq!(model.resource_usage().accessibility_nodes, 0);
+        model
+            .replace_accessibility(second_window, Some(single(2, "乙")))
+            .unwrap();
+        model.close(application).unwrap();
+        assert_eq!(model.resource_usage(), ResourceUsage::default());
     }
 
     #[test]
