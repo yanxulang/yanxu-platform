@@ -269,6 +269,48 @@ pub struct WindowState {
     pub accessibility: AccessibilityState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationLifecycle {
+    Ready,
+    Running,
+    ExitRequested,
+    Exited,
+    Closed,
+}
+
+impl ApplicationLifecycle {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ready => "就绪",
+            Self::Running => "运行中",
+            Self::ExitRequested => "退出请求",
+            Self::Exited => "已退出",
+            Self::Closed => "已关闭",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationState {
+    pub name: String,
+    lifecycle: ApplicationLifecycle,
+    event_loop_active: bool,
+    exit_error: Option<&'static str>,
+}
+
+impl ApplicationState {
+    #[must_use]
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            lifecycle: ApplicationLifecycle::Ready,
+            event_loop_active: false,
+            exit_error: None,
+        }
+    }
+}
+
 impl Default for WindowState {
     fn default() -> Self {
         Self {
@@ -321,10 +363,7 @@ pub struct DisplayState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResourceState {
-    Application {
-        name: String,
-        exit_requested: bool,
-    },
+    Application(ApplicationState),
     Window(Box<WindowState>),
     Timer(TimerState),
     Image {
@@ -342,7 +381,7 @@ impl ResourceState {
     #[must_use]
     pub const fn kind(&self) -> ResourceKind {
         match self {
-            Self::Application { .. } => ResourceKind::Application,
+            Self::Application(_) => ResourceKind::Application,
             Self::Window(_) => ResourceKind::Window,
             Self::Timer(_) => ResourceKind::Timer,
             Self::Image { .. } => ResourceKind::Image,
@@ -356,7 +395,7 @@ impl ResourceState {
             ..ResourceUsage::default()
         };
         match self {
-            Self::Application { .. } => {}
+            Self::Application(_) => {}
             Self::Window(window) => {
                 usage.windows = 1;
                 usage.frame_bytes = window.frame.len();
@@ -444,6 +483,8 @@ pub enum ModelError {
     Quota(QuotaKind),
     QuotaConfiguration(QuotaKind),
     QuotaLocked,
+    ApplicationRunning,
+    ApplicationExited,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -488,6 +529,8 @@ impl Display for ModelError {
                 write!(formatter, "平台应用{}配额配置无效", kind.name())
             }
             Self::QuotaLocked => formatter.write_str("平台应用资源配额已经冻结"),
+            Self::ApplicationRunning => formatter.write_str("平台应用事件循环已经运行"),
+            Self::ApplicationExited => formatter.write_str("平台应用已经退出，不能再次运行"),
         }
     }
 }
@@ -561,7 +604,6 @@ pub struct Model {
     accessibility_metrics: AccessibilityMetrics,
     active_accessibility_bridges: BTreeSet<u64>,
     pub events: EventBatcher,
-    pub running: bool,
     pub displays: Vec<DisplayState>,
     pub system_theme: String,
 }
@@ -580,7 +622,6 @@ impl Default for Model {
             accessibility_metrics: AccessibilityMetrics::default(),
             active_accessibility_bridges: BTreeSet::new(),
             events: EventBatcher::default(),
-            running: false,
             displays: Vec::new(),
             system_theme: "系统".to_owned(),
         }
@@ -733,10 +774,100 @@ impl Model {
 
     #[must_use]
     pub fn application_exit_requested(&self, id: u64) -> Option<bool> {
-        let ResourceState::Application { exit_requested, .. } = &self.get(id).ok()?.state else {
+        let ResourceState::Application(application) = &self.get(id).ok()?.state else {
             return None;
         };
-        Some(*exit_requested)
+        Some(application.lifecycle == ApplicationLifecycle::ExitRequested)
+    }
+
+    #[must_use]
+    pub fn application_lifecycle(&self, id: u64) -> ApplicationLifecycle {
+        let Some(ResourceNode {
+            state: ResourceState::Application(application),
+            ..
+        }) = self.resources.get(&id)
+        else {
+            return ApplicationLifecycle::Closed;
+        };
+        application.lifecycle
+    }
+
+    #[must_use]
+    pub fn application_lifecycle_summary(&self) -> ApplicationLifecycle {
+        self.resources
+            .values()
+            .find_map(|node| match &node.state {
+                ResourceState::Application(application) => Some(application.lifecycle),
+                _ => None,
+            })
+            .unwrap_or(ApplicationLifecycle::Closed)
+    }
+
+    #[must_use]
+    pub fn application_exit_error(&self) -> Option<&'static str> {
+        self.resources.values().find_map(|node| match &node.state {
+            ResourceState::Application(application) => application.exit_error,
+            _ => None,
+        })
+    }
+
+    #[must_use]
+    pub fn event_loop_active(&self) -> bool {
+        self.resources.values().any(|node| {
+            matches!(
+                &node.state,
+                ResourceState::Application(application) if application.event_loop_active
+            )
+        })
+    }
+
+    pub fn begin_application_run(&mut self, id: u64) -> Result<(), ModelError> {
+        {
+            let node = self.get_mut(id)?;
+            let ResourceState::Application(application) = &mut node.state else {
+                return Err(ModelError::Kind(id));
+            };
+            if application.event_loop_active {
+                return Err(ModelError::ApplicationRunning);
+            }
+            if application.lifecycle == ApplicationLifecycle::Exited {
+                return Err(ModelError::ApplicationExited);
+            }
+            application.event_loop_active = true;
+            if application.lifecycle != ApplicationLifecycle::ExitRequested {
+                application.lifecycle = ApplicationLifecycle::Running;
+            }
+            application.exit_error = None;
+        }
+        self.resource_limits_locked = true;
+        Ok(())
+    }
+
+    pub fn finish_application_run(&mut self, id: u64, error: Option<&'static str>) {
+        let Ok(node) = self.get_mut(id) else {
+            return;
+        };
+        let ResourceState::Application(application) = &mut node.state else {
+            return;
+        };
+        application.event_loop_active = false;
+        application.lifecycle = ApplicationLifecycle::Exited;
+        application.exit_error = error;
+    }
+
+    pub fn request_application_exit(&mut self, id: u64) -> Result<bool, ModelError> {
+        let node = self.get_mut(id)?;
+        let ResourceState::Application(application) = &mut node.state else {
+            return Err(ModelError::Kind(id));
+        };
+        if matches!(
+            application.lifecycle,
+            ApplicationLifecycle::ExitRequested | ApplicationLifecycle::Exited
+        ) {
+            return Ok(false);
+        }
+        application.lifecycle = ApplicationLifecycle::ExitRequested;
+        Ok(true)
     }
 
     pub fn close(&mut self, id: u64) -> Result<Vec<u64>, ModelError> {
@@ -857,7 +988,7 @@ impl Model {
                 return Err(ModelError::QuotaConfiguration(kind));
             }
         };
-        if self.resource_limits_locked || self.running {
+        if self.resource_limits_locked || self.event_loop_active() {
             self.quota_metrics.record_locked();
             return Err(ModelError::QuotaLocked);
         }
@@ -1335,10 +1466,7 @@ mod tests {
         model
             .create(
                 None,
-                ResourceState::Application {
-                    name: "测试".to_owned(),
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
             )
             .unwrap()
     }
@@ -1562,7 +1690,7 @@ mod tests {
     #[test]
     fn rejects_invalid_or_running_application_quota_configuration() {
         let mut model = Model::default();
-        app(&mut model);
+        let application = app(&mut model);
         let limits = ResourceLimits {
             resources: 0,
             ..ResourceLimits::default()
@@ -1580,12 +1708,12 @@ mod tests {
             Err(ModelError::QuotaConfiguration(QuotaKind::Windows))
         );
 
-        model.running = true;
+        model.begin_application_run(application).unwrap();
         assert_eq!(
             model.configure_resource_limits(ResourceLimits::default()),
             Err(ModelError::QuotaLocked)
         );
-        model.running = false;
+        model.finish_application_run(application, None);
         model.lock_resource_limits();
         assert_eq!(
             model.configure_resource_limits(ResourceLimits::default()),
@@ -1766,6 +1894,91 @@ mod tests {
                 created: 1,
                 closed: 1,
             }
+        );
+    }
+
+    #[test]
+    fn application_lifecycle_is_monotonic_and_exit_is_idempotent() {
+        let mut model = Model::default();
+        assert_eq!(
+            model.application_lifecycle_summary(),
+            ApplicationLifecycle::Closed
+        );
+        let application = app(&mut model);
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::Ready
+        );
+        assert!(!model.event_loop_active());
+
+        model.begin_application_run(application).unwrap();
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::Running
+        );
+        assert!(model.event_loop_active());
+        assert!(model.resource_limits_locked());
+        assert_eq!(
+            model.begin_application_run(application),
+            Err(ModelError::ApplicationRunning)
+        );
+
+        assert_eq!(model.request_application_exit(application), Ok(true));
+        assert_eq!(model.request_application_exit(application), Ok(false));
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::ExitRequested
+        );
+        assert!(model.event_loop_active());
+
+        model.finish_application_run(application, Some("PLATFORM_PRESENT"));
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::Exited
+        );
+        assert!(!model.event_loop_active());
+        assert_eq!(model.application_exit_error(), Some("PLATFORM_PRESENT"));
+        assert_eq!(model.request_application_exit(application), Ok(false));
+        assert_eq!(
+            model.begin_application_run(application),
+            Err(ModelError::ApplicationExited)
+        );
+
+        model.close(application).unwrap();
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::Closed
+        );
+        assert_eq!(
+            model.application_lifecycle_summary(),
+            ApplicationLifecycle::Closed
+        );
+        assert_eq!(model.application_exit_error(), None);
+    }
+
+    #[test]
+    fn pre_run_exit_request_does_not_freeze_quotas_until_run_begins() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        assert_eq!(model.request_application_exit(application), Ok(true));
+        assert!(!model.resource_limits_locked());
+        let limits = ResourceLimits {
+            windows: 1,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(model.configure_resource_limits(limits), Ok(limits));
+
+        model.begin_application_run(application).unwrap();
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::ExitRequested
+        );
+        assert!(model.event_loop_active());
+        assert!(model.resource_limits_locked());
+        model.finish_application_run(application, None);
+        assert_eq!(
+            model.application_lifecycle(application),
+            ApplicationLifecycle::Exited
         );
     }
 

@@ -4,7 +4,7 @@ use crate::accessibility::AccessibilitySource;
 use crate::backend::{HostApi, PlatformResource, monotonic_seconds};
 use crate::data::Data;
 use crate::event::{EventKind, PlatformEvent};
-use crate::model::{DisplayState, Model, ResourceKind, ResourceState, WindowState};
+use crate::model::{DisplayState, Model, ModelError, ResourceKind, ResourceState, WindowState};
 use crate::native_accessibility::{
     NativeActivationHandler, NativeRequest, NativeTreeSnapshot, translate_action_request,
 };
@@ -33,6 +33,8 @@ use winit::window::{CursorIcon, Fullscreen, ImePurpose, Theme, Window, WindowId,
 
 struct RunningGuard {
     model: Arc<Mutex<Model>>,
+    application_id: u64,
+    error: Option<&'static str>,
 }
 
 enum UserEvent {
@@ -71,7 +73,9 @@ pub fn wake(event_loop_id: u64) -> bool {
 
 impl Drop for RunningGuard {
     fn drop(&mut self) {
-        self.model.lock_recover().running = false;
+        self.model
+            .lock_recover()
+            .finish_application_run(self.application_id, self.error);
     }
 }
 
@@ -84,43 +88,54 @@ pub fn run(
 ) -> Result<(), &'static str> {
     {
         let mut model = model.lock_recover();
-        if model.running {
-            return Err("PLATFORM_EVENT_LOOP_RUNNING");
-        }
-        if model.application_exit_requested(application_id).is_none() {
-            return Err("PLATFORM_RESOURCE_CLOSED");
-        }
-        model.lock_resource_limits();
-        model.running = true;
+        model
+            .begin_application_run(application_id)
+            .map_err(application_run_error_code)?;
     }
-    let _running = RunningGuard {
+    let mut running = RunningGuard {
         model: model.clone(),
-    };
-    let event_loop = EventLoop::<UserEvent>::with_user_event()
-        .build()
-        .map_err(|_| "PLATFORM_EVENT_LOOP")?;
-    let event_loop_proxy = event_loop.create_proxy();
-    PROXIES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock_recover()
-        .insert(host.0.event_loop_id, event_loop_proxy.clone());
-    let _proxy = ProxyGuard {
-        event_loop_id: host.0.event_loop_id,
-    };
-    let context =
-        Context::new(event_loop.owned_display_handle()).map_err(|_| "PLATFORM_SURFACE_CREATE")?;
-    let mut runner = Runner::new(
-        model,
-        host,
-        callback,
         application_id,
-        context,
-        event_loop_proxy,
-    );
-    event_loop
-        .run_app(&mut runner)
-        .map_err(|_| "PLATFORM_EVENT_LOOP")?;
-    runner.fatal.map_or(Ok(()), Err)
+        error: Some("PLATFORM_EVENT_LOOP"),
+    };
+    let result = (|| {
+        let event_loop = EventLoop::<UserEvent>::with_user_event()
+            .build()
+            .map_err(|_| "PLATFORM_EVENT_LOOP")?;
+        let event_loop_proxy = event_loop.create_proxy();
+        PROXIES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock_recover()
+            .insert(host.0.event_loop_id, event_loop_proxy.clone());
+        let _proxy = ProxyGuard {
+            event_loop_id: host.0.event_loop_id,
+        };
+        let context = Context::new(event_loop.owned_display_handle())
+            .map_err(|_| "PLATFORM_SURFACE_CREATE")?;
+        let mut runner = Runner::new(
+            model,
+            host,
+            callback,
+            application_id,
+            context,
+            event_loop_proxy,
+        );
+        event_loop
+            .run_app(&mut runner)
+            .map_err(|_| "PLATFORM_EVENT_LOOP")?;
+        runner.fatal.map_or(Ok(()), Err)
+    })();
+    running.error = result.as_ref().err().copied();
+    result
+}
+
+const fn application_run_error_code(error: ModelError) -> &'static str {
+    match error {
+        ModelError::Missing(_) => "PLATFORM_RESOURCE_CLOSED",
+        ModelError::Kind(_) => "PLATFORM_RESOURCE_TYPE",
+        ModelError::ApplicationRunning => "PLATFORM_EVENT_LOOP_RUNNING",
+        ModelError::ApplicationExited => "PLATFORM_APPLICATION_EXITED",
+        _ => "PLATFORM_RESOURCE",
+    }
 }
 
 struct NativeWindow {
@@ -1390,6 +1405,7 @@ mod tests {
     use super::*;
     use crate::accessibility::SemanticTree;
     use crate::event::EventBatcher;
+    use crate::model::ApplicationState;
     use accesskit::{Action, ActionData, ActionRequest, NodeId, TreeId};
     use winit::event::MouseScrollDelta;
     use winit::keyboard::{KeyCode, NamedKey};
@@ -1472,10 +1488,7 @@ mod tests {
         let application = model
             .create(
                 None,
-                ResourceState::Application {
-                    name: "测试".to_owned(),
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
             )
             .unwrap();
         let window = model

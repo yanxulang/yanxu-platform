@@ -10,8 +10,9 @@ use crate::bridge::{encode_data, free_value};
 use crate::data::Data;
 use crate::event::{EVENT_MAJOR, EVENT_MINOR, EventKind, PlatformEvent};
 use crate::model::{
-    FrameSubmission, Model, ModelError, QuotaKind, QuotaMetrics, ResourceCreationError,
-    ResourceKind, ResourceLimits, ResourceState, ResourceUsage, TimerState, WindowState,
+    ApplicationState, FrameSubmission, Model, ModelError, QuotaKind, QuotaMetrics,
+    ResourceCreationError, ResourceKind, ResourceLimits, ResourceState, ResourceUsage, TimerState,
+    WindowState,
 };
 use crate::protocol;
 use crate::sync::{RecoverMutex, recovered_lock_count};
@@ -292,10 +293,7 @@ pub unsafe fn call(
             let text_service = Arc::new(Mutex::new(TextService::new()));
             let id = match model.lock_recover().create(
                 None,
-                ResourceState::Application {
-                    name,
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new(name)),
             ) {
                 Ok(id) => id,
                 Err(error) => {
@@ -879,16 +877,14 @@ pub unsafe fn call(
             let (_, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
             let mut model = application.model.lock_recover();
-            let node = model
-                .get_mut(application.id)
-                .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
-            let ResourceState::Application { exit_requested, .. } = &mut node.state else {
-                return Err("PLATFORM_RESOURCE_TYPE");
-            };
-            *exit_requested = true;
+            let changed = model
+                .request_application_exit(application.id)
+                .map_err(model_error_code)?;
             drop(model);
-            let _ = crate::windowing::wake(host.0.event_loop_id);
-            host.wake();
+            if changed {
+                let _ = crate::windowing::wake(host.0.event_loop_id);
+                host.wake();
+            }
             Ok(Output::Value(Data::Nil))
         }
         Operation::Wake => {
@@ -1025,6 +1021,11 @@ fn capabilities() -> Data {
         ("应用资源配额可下调", Data::Bool(true)),
         ("应用资源配额拒绝统计", Data::Bool(true)),
         (
+            "应用生命周期状态",
+            string_list(&["就绪", "运行中", "退出请求", "已退出", "已关闭"]),
+        ),
+        ("应用退出幂等", Data::Bool(true)),
+        (
             "应用资源硬上限",
             resource_limits_data(ResourceLimits::default()),
         ),
@@ -1105,7 +1106,7 @@ fn window_command(
     value: &Data,
 ) -> Result<(), &'static str> {
     let mut model = resource.model.lock_recover();
-    let running = model.running;
+    let running = model.event_loop_active();
     let node = model
         .get_mut(resource.id)
         .map_err(|_| "PLATFORM_RESOURCE_CLOSED")?;
@@ -1256,7 +1257,17 @@ fn debug_snapshot(model: &Model) -> Data {
         ("图片", usize_data(model.count(ResourceKind::Image))),
         ("字体", usize_data(model.count(ResourceKind::Font))),
         ("待处理事件", usize_data(events.queued)),
-        ("运行中", Data::Bool(model.running)),
+        (
+            "应用状态",
+            Data::String(model.application_lifecycle_summary().name().to_owned()),
+        ),
+        ("运行中", Data::Bool(model.event_loop_active())),
+        (
+            "退出错误",
+            model
+                .application_exit_error()
+                .map_or(Data::Nil, |error| Data::String(error.to_owned())),
+        ),
         ("状态恢复次数", u64_data(recovered_lock_count())),
         (
             "事件队列",
@@ -1956,6 +1967,8 @@ const fn model_error_code(error: ModelError) -> &'static str {
         ModelError::Quota(kind) => kind.code(),
         ModelError::QuotaConfiguration(_) => "PLATFORM_QUOTA_CONFIG",
         ModelError::QuotaLocked => "PLATFORM_QUOTA_LOCKED",
+        ModelError::ApplicationRunning => "PLATFORM_EVENT_LOOP_RUNNING",
+        ModelError::ApplicationExited => "PLATFORM_APPLICATION_EXITED",
         ModelError::Parent(_) | ModelError::Overflow => "PLATFORM_RESOURCE_LIMIT",
     }
 }
@@ -2195,6 +2208,14 @@ mod tests {
             Data::Bool(true)
         );
         assert_eq!(
+            capabilities().as_map().unwrap()["应用生命周期状态"],
+            string_list(&["就绪", "运行中", "退出请求", "已退出", "已关闭"])
+        );
+        assert_eq!(
+            capabilities().as_map().unwrap()["应用退出幂等"],
+            Data::Bool(true)
+        );
+        assert_eq!(
             capabilities().as_map().unwrap()["应用资源硬上限"],
             resource_limits_data(ResourceLimits::default())
         );
@@ -2310,10 +2331,7 @@ mod tests {
         let application = model
             .create(
                 None,
-                ResourceState::Application {
-                    name: "测试".to_owned(),
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
             )
             .unwrap();
         let window = model
@@ -2340,6 +2358,9 @@ mod tests {
         let snapshot = debug_snapshot(&model);
         let snapshot = snapshot.as_map().unwrap();
         assert_eq!(snapshot["待处理事件"], Data::Integer(1));
+        assert_eq!(snapshot["应用状态"], Data::String("就绪".to_owned()));
+        assert_eq!(snapshot["运行中"], Data::Bool(false));
+        assert_eq!(snapshot["退出错误"], Data::Nil);
         let events = snapshot["事件队列"].as_map().unwrap();
         assert_eq!(events["接收总数"], Data::Integer(2));
         assert_eq!(events["合并总数"], Data::Integer(1));
@@ -2472,10 +2493,7 @@ mod tests {
         let application = model
             .create(
                 None,
-                ResourceState::Application {
-                    name: "测试".to_owned(),
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
             )
             .unwrap();
         let mut loader_called = false;
@@ -2495,10 +2513,7 @@ mod tests {
         let application = model
             .create(
                 None,
-                ResourceState::Application {
-                    name: "测试".to_owned(),
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
             )
             .unwrap();
         let font = create_loaded_font(&mut model, application, vec![4, 5, 6], |bytes| {
@@ -2525,10 +2540,7 @@ mod tests {
         let application = model
             .create(
                 None,
-                ResourceState::Application {
-                    name: "测试".to_owned(),
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
             )
             .unwrap();
         let mut decoder_called = false;
@@ -2552,10 +2564,7 @@ mod tests {
         let application = model
             .create(
                 None,
-                ResourceState::Application {
-                    name: "测试".to_owned(),
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
             )
             .unwrap();
         assert_eq!(

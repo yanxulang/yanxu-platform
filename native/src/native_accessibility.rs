@@ -667,7 +667,7 @@ fn state_bool(states: &BTreeMap<String, Data>, name: &str) -> Option<bool> {
 mod tests {
     use super::*;
     use crate::accessibility::{SEMANTIC_ACTIONS, SEMANTIC_ROLES, SemanticTree};
-    use crate::model::ResourceState;
+    use crate::model::{ApplicationState, ResourceState};
     use accesskit::{ScrollHint, TextPosition, TextSelection};
 
     fn semantic_node(
@@ -1050,10 +1050,7 @@ mod tests {
         let application = model
             .create(
                 None,
-                ResourceState::Application {
-                    name: "测试".to_owned(),
-                    exit_requested: false,
-                },
+                ResourceState::Application(ApplicationState::new("测试".to_owned())),
             )
             .unwrap();
         let window = model
