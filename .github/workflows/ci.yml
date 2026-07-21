@@ -168,9 +168,38 @@ jobs:
           cargo deny check advisories licenses sources
           cargo audit --file Cargo.lock --deny warnings --ignore RUSTSEC-2026-0192
 
+  performance-budget:
+    name: Release 性能预算
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: 安装 Linux 图形开发库
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev
+      - name: 执行长样本 Release 性能预算
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --release --locked --example performance_budget -- \
+            --report "$RUNNER_TEMP/yanxu-platform-performance-budget.json"
+          jq -e \
+            '.schema == 1 and .profile == "release" and .passed == true and
+             (.cases | length == 4) and all(.cases[]; .passed == true)' \
+            "$RUNNER_TEMP/yanxu-platform-performance-budget.json"
+      - name: 保存性能预算报告
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: yanxu-platform-performance-budget
+          path: ${{ runner.temp }}/yanxu-platform-performance-budget.json
+          if-no-files-found: error
+
   assemble:
     name: 汇总六目标正式包候选
-    needs: [native, dependency-policy]
+    needs: [native, dependency-policy, performance-budget]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
