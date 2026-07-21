@@ -9,8 +9,10 @@ use accesskit::{
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use unicode_segmentation::UnicodeSegmentation;
 
 pub(crate) const WINDOW_ROOT_ID: NodeId = NodeId(0);
+const TEXT_RUN_ID_MASK: u64 = 1 << 63;
 
 const CUSTOM_SELECT: i32 = 1;
 const CUSTOM_DESELECT: i32 = 2;
@@ -144,7 +146,12 @@ pub(crate) fn full_tree_update(
         y1: f64::from(physical_size[1]),
     });
 
-    let mut nodes = Vec::with_capacity(accessibility.node_count().saturating_add(1));
+    let mut nodes = Vec::with_capacity(
+        accessibility
+            .node_count()
+            .saturating_mul(2)
+            .saturating_add(1),
+    );
     if let Some(tree) = accessibility.tree() {
         window.push_child(node_id(tree.root().id()));
     }
@@ -193,24 +200,73 @@ fn append_node(nodes: &mut Vec<(NodeId, Node)>, semantic: &SemanticNode, scale_f
         semantic.states(),
     );
 
-    let [x, y, width, height] = semantic.bounds();
-    native.set_bounds(Rect {
+    let bounds = native_bounds(semantic.bounds(), scale_factor);
+    native.set_bounds(bounds);
+    let text_run = native_text_run(semantic, bounds);
+    let mut children = Vec::with_capacity(
+        semantic
+            .children()
+            .len()
+            .saturating_add(usize::from(text_run.is_some())),
+    );
+    if let Some((text_run_id, _)) = &text_run {
+        children.push(*text_run_id);
+    }
+    children.extend(semantic.children().iter().map(|child| node_id(child.id())));
+    native.set_children(children);
+    nodes.push((node_id(semantic.id()), native));
+    if let Some(text_run) = text_run {
+        nodes.push(text_run);
+    }
+    for child in semantic.children() {
+        append_node(nodes, child, scale_factor);
+    }
+}
+
+fn native_bounds([x, y, width, height]: [f64; 4], scale_factor: f64) -> Rect {
+    Rect {
         x0: x * scale_factor,
         y0: y * scale_factor,
         x1: (x + width) * scale_factor,
         y1: (y + height) * scale_factor,
-    });
-    native.set_children(
-        semantic
-            .children()
-            .iter()
-            .map(|child| node_id(child.id()))
-            .collect::<Vec<_>>(),
-    );
-    nodes.push((node_id(semantic.id()), native));
-    for child in semantic.children() {
-        append_node(nodes, child, scale_factor);
     }
+}
+
+fn native_text_run(semantic: &SemanticNode, bounds: Rect) -> Option<(NodeId, Node)> {
+    if !matches!(semantic.role(), "输入框" | "多行输入框") {
+        return None;
+    }
+    let value = match semantic.value() {
+        Data::String(value) => value.as_str(),
+        Data::Nil => "",
+        _ => return None,
+    };
+    let mut text = Node::new(Role::TextRun);
+    text.set_value(value);
+    text.set_character_lengths(grapheme_byte_lengths(value));
+    text.set_bounds(bounds);
+    Some((text_run_id(semantic.id()), text))
+}
+
+fn text_run_id(id: i64) -> NodeId {
+    NodeId(node_id(id).0 | TEXT_RUN_ID_MASK)
+}
+
+fn grapheme_byte_lengths(value: &str) -> Vec<u8> {
+    let mut lengths = Vec::new();
+    for grapheme in value.graphemes(true) {
+        if let Ok(length) = u8::try_from(grapheme.len()) {
+            lengths.push(length);
+        } else {
+            lengths.extend(
+                grapheme
+                    .chars()
+                    .map(char::len_utf8)
+                    .map(|length| u8::try_from(length).expect("UTF-8 scalar length fits in u8")),
+            );
+        }
+    }
+    lengths
 }
 
 fn native_role(role: &str) -> Role {
@@ -785,5 +841,75 @@ mod tests {
             converted_node(&second, 1).bounds(),
             Some(Rect::new(2.0, 4.0, 8.0, 12.0))
         );
+    }
+
+    #[test]
+    fn exposes_editable_text_as_grapheme_bounded_text_runs() {
+        let value = "A言👨‍👩‍👧‍👦e\u{301}\r\n";
+        let state = state_with(semantic_node(
+            1,
+            "多行输入框",
+            Data::String(value.to_owned()),
+            BTreeMap::new(),
+            &["选择"],
+            [1.0, 2.0, 3.0, 4.0],
+            Vec::new(),
+        ));
+        let update = full_tree_update("", [20, 20], 2.0, &state);
+        let input = converted_node(&update, 1);
+        let run_id = NodeId(TEXT_RUN_ID_MASK | 1);
+        assert_eq!(input.children(), &[run_id]);
+        let run = converted_node(&update, run_id.0);
+        assert_eq!(run.role(), Role::TextRun);
+        assert_eq!(run.value(), Some(value));
+        assert_eq!(run.character_lengths(), &[1, 3, 25, 3, 2]);
+        assert_eq!(run.bounds(), Some(Rect::new(2.0, 4.0, 8.0, 12.0)));
+    }
+
+    #[test]
+    fn empty_inputs_have_a_run_but_passwords_never_do() {
+        let input = semantic_node(
+            2,
+            "输入框",
+            Data::Nil,
+            BTreeMap::new(),
+            &["选择"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let password = semantic_node(
+            3,
+            "密码框",
+            Data::Nil,
+            BTreeMap::new(),
+            &["选择"],
+            [0.0, 0.0, 1.0, 1.0],
+            Vec::new(),
+        );
+        let state = state_with(semantic_node(
+            1,
+            "面板",
+            Data::Nil,
+            BTreeMap::new(),
+            &[],
+            [0.0, 0.0, 1.0, 1.0],
+            vec![input, password],
+        ));
+        let update = full_tree_update("", [1, 1], 1.0, &state);
+        let input_run = converted_node(&update, TEXT_RUN_ID_MASK | 2);
+        assert_eq!(input_run.value(), Some(""));
+        assert!(input_run.character_lengths().is_empty());
+        assert!(converted_node(&update, 3).children().is_empty());
+
+        let oversized_grapheme = format!("a{}", "\u{301}".repeat(200));
+        let lengths = grapheme_byte_lengths(&oversized_grapheme);
+        assert_eq!(
+            lengths
+                .iter()
+                .map(|length| usize::from(*length))
+                .sum::<usize>(),
+            oversized_grapheme.len()
+        );
+        assert!(lengths.len() > 1);
     }
 }
