@@ -10,8 +10,8 @@ use crate::bridge::{encode_data, free_value};
 use crate::data::Data;
 use crate::event::{EVENT_MAJOR, EVENT_MINOR, EventKind, PlatformEvent};
 use crate::model::{
-    FrameSubmission, Model, ModelError, QuotaMetrics, ResourceKind, ResourceLimits, ResourceState,
-    ResourceUsage, TimerState, WindowState,
+    FrameSubmission, Model, ModelError, QuotaMetrics, ResourceCreationError, ResourceKind,
+    ResourceLimits, ResourceState, ResourceUsage, TimerState, WindowState,
 };
 use crate::protocol;
 use crate::sync::{RecoverMutex, recovered_lock_count};
@@ -331,30 +331,30 @@ pub unsafe fn call(
             let mut window = WindowState::default();
             apply_window_config(&mut window, config)?;
             let mut model = application.model.lock_recover();
+            let visible = window.visible;
+            let created_at = monotonic_seconds();
             let id = model
-                .create(
+                .create_with_events(
                     Some(application.id),
-                    ResourceState::Window(Box::new(window.clone())),
+                    ResourceState::Window(Box::new(window)),
+                    |id| {
+                        let mut events = Vec::with_capacity(2);
+                        if visible {
+                            events.push(PlatformEvent::new(
+                                EventKind::WindowShown,
+                                Some(id),
+                                created_at,
+                            ));
+                        }
+                        events.push(PlatformEvent::new(
+                            EventKind::RedrawRequested,
+                            Some(id),
+                            created_at,
+                        ));
+                        events
+                    },
                 )
-                .map_err(model_error_code)?;
-            if window.visible {
-                model
-                    .events
-                    .push(PlatformEvent::new(
-                        EventKind::WindowShown,
-                        Some(id),
-                        monotonic_seconds(),
-                    ))
-                    .map_err(|_| "PLATFORM_QUEUE_FULL")?;
-            }
-            model
-                .events
-                .push(PlatformEvent::new(
-                    EventKind::RedrawRequested,
-                    Some(id),
-                    monotonic_seconds(),
-                ))
-                .map_err(|_| "PLATFORM_QUEUE_FULL")?;
+                .map_err(resource_creation_error_code)?;
             drop(model);
             Ok(resource_output(
                 application.model.clone(),
@@ -1867,6 +1867,16 @@ const fn model_error_code(error: ModelError) -> &'static str {
         ModelError::QuotaConfiguration(_) => "PLATFORM_QUOTA_CONFIG",
         ModelError::QuotaLocked => "PLATFORM_QUOTA_LOCKED",
         ModelError::Parent(_) | ModelError::Overflow => "PLATFORM_RESOURCE_LIMIT",
+    }
+}
+
+const fn resource_creation_error_code(error: ResourceCreationError) -> &'static str {
+    match error {
+        ResourceCreationError::Model(error) => model_error_code(error),
+        ResourceCreationError::Queue(crate::event::EventQueueError::Full) => "PLATFORM_QUEUE_FULL",
+        ResourceCreationError::Queue(crate::event::EventQueueError::InvalidNumber) => {
+            "PLATFORM_VALUE_TYPE"
+        }
     }
 }
 

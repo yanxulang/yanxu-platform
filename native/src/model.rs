@@ -446,6 +446,35 @@ pub enum ModelError {
     QuotaLocked,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceCreationError {
+    Model(ModelError),
+    Queue(EventQueueError),
+}
+
+impl Display for ResourceCreationError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Model(error) => Display::fmt(error, formatter),
+            Self::Queue(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for ResourceCreationError {}
+
+impl From<ModelError> for ResourceCreationError {
+    fn from(error: ModelError) -> Self {
+        Self::Model(error)
+    }
+}
+
+impl From<EventQueueError> for ResourceCreationError {
+    fn from(error: EventQueueError) -> Self {
+        Self::Queue(error)
+    }
+}
+
 impl Display for ModelError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -612,6 +641,39 @@ impl Model {
             .high_watermark
             .max(self.resource_metrics.live);
         self.resource_metrics.created = self.resource_metrics.created.saturating_add(1);
+        Ok(id)
+    }
+
+    pub fn create_with_events(
+        &mut self,
+        parent: Option<u64>,
+        state: ResourceState,
+        events: impl FnOnce(u64) -> Vec<PlatformEvent>,
+    ) -> Result<u64, ResourceCreationError> {
+        let previous_next_id = self.next_id;
+        let previous_limits_locked = self.resource_limits_locked;
+        let previous_usage = self.resource_usage;
+        let previous_metrics = self.resource_metrics;
+        let id = self.create(parent, state)?;
+        if let Err(error) = self.events.push_batch(events(id)) {
+            let removed = self
+                .resources
+                .remove(&id)
+                .expect("newly created resource must exist during rollback");
+            debug_assert_eq!(removed.parent, parent);
+            if let Some(parent_id) = parent {
+                self.resources
+                    .get_mut(&parent_id)
+                    .expect("validated parent must exist during rollback")
+                    .children
+                    .remove(&id);
+            }
+            self.next_id = previous_next_id;
+            self.resource_limits_locked = previous_limits_locked;
+            self.resource_usage = previous_usage;
+            self.resource_metrics = previous_metrics;
+            return Err(error.into());
+        }
         Ok(id)
     }
 
@@ -1381,6 +1443,52 @@ mod tests {
         assert_eq!(replacement, timer + 1);
         model.close(application).unwrap();
         assert_eq!(model.resource_usage(), ResourceUsage::default());
+    }
+
+    #[test]
+    fn initial_event_failure_rolls_back_resource_creation() {
+        let mut model = Model::default();
+        let application = app(&mut model);
+        model.events = EventBatcher::with_capacity(1);
+
+        assert_eq!(
+            model.create_with_events(
+                Some(application),
+                ResourceState::Window(Box::default()),
+                |id| vec![
+                    PlatformEvent::new(EventKind::WindowShown, Some(id), 1.0),
+                    PlatformEvent::new(EventKind::RedrawRequested, Some(id), 1.0),
+                ],
+            ),
+            Err(ResourceCreationError::Queue(EventQueueError::Full))
+        );
+        assert_eq!(model.count(ResourceKind::Window), 0);
+        assert_eq!(
+            model.resource_usage(),
+            ResourceUsage {
+                resources: 1,
+                ..ResourceUsage::default()
+            }
+        );
+        assert_eq!(
+            model.resource_metrics(),
+            ResourceMetrics {
+                live: 1,
+                high_watermark: 1,
+                created: 1,
+                closed: 0,
+            }
+        );
+        assert!(!model.resource_limits_locked());
+        assert!(model.get(application).unwrap().children.is_empty());
+        assert_eq!(model.events.metrics().queued, 0);
+        assert_eq!(model.events.metrics().accepted, 0);
+        assert_eq!(model.events.metrics().rejected, 1);
+
+        let window = model
+            .create(Some(application), ResourceState::Window(Box::default()))
+            .unwrap();
+        assert_eq!(window, application + 1);
     }
 
     #[test]
