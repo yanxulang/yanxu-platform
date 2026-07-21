@@ -130,6 +130,46 @@ impl SemanticNode {
     }
 
     #[must_use]
+    pub(crate) fn role(&self) -> &str {
+        &self.role
+    }
+
+    #[must_use]
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub(crate) fn description(&self) -> &str {
+        &self.description
+    }
+
+    #[must_use]
+    pub(crate) const fn value(&self) -> &Data {
+        &self.value
+    }
+
+    #[must_use]
+    pub(crate) const fn states(&self) -> &BTreeMap<String, Data> {
+        &self.states
+    }
+
+    #[must_use]
+    pub(crate) fn actions(&self) -> &[String] {
+        &self.actions
+    }
+
+    #[must_use]
+    pub(crate) const fn bounds(&self) -> [f64; 4] {
+        self.bounds
+    }
+
+    #[must_use]
+    pub(crate) fn children(&self) -> &[Self] {
+        &self.children
+    }
+
+    #[must_use]
     pub fn to_data(&self) -> Data {
         Data::map([
             ("编号", Data::Integer(self.id)),
