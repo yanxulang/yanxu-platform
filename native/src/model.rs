@@ -2052,6 +2052,128 @@ mod tests {
     }
 
     #[test]
+    fn repeated_shutdown_reclaims_all_resources_and_usage() {
+        const CYCLES: usize = 128;
+        const RESOURCES_PER_CYCLE: usize = 15;
+        let tree = SemanticTree::validate(&Data::map([
+            ("编号", Data::Integer(1)),
+            ("角色", Data::String("文字".to_owned())),
+            ("名称", Data::String("压力节点".to_owned())),
+            (
+                "边界",
+                Data::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+            ),
+        ]))
+        .unwrap();
+        let mut model = Model::default();
+
+        for cycle in 0..CYCLES {
+            let application = app(&mut model);
+            for index in 0..4 {
+                let window = model
+                    .create(Some(application), ResourceState::Window(Box::default()))
+                    .unwrap();
+                model
+                    .submit_frame(window, vec![u8::try_from(index).unwrap(); 256], 1.0)
+                    .unwrap();
+                model
+                    .replace_accessibility(window, Some(tree.clone()))
+                    .unwrap();
+            }
+            for index in 0..4 {
+                model
+                    .create(
+                        Some(application),
+                        ResourceState::Timer(TimerState {
+                            interval: Duration::from_millis(10),
+                            repeating: index % 2 == 0,
+                            next_deadline: Instant::now() + Duration::from_millis(10),
+                            cancelled: false,
+                        }),
+                    )
+                    .unwrap();
+            }
+            for index in 0..4 {
+                model
+                    .create(
+                        Some(application),
+                        ResourceState::Image {
+                            width: 4,
+                            height: 4,
+                            rgba: vec![u8::try_from(index).unwrap(); 64],
+                        },
+                    )
+                    .unwrap();
+            }
+            for index in 0..2 {
+                model
+                    .create(
+                        Some(application),
+                        ResourceState::Font {
+                            family: format!("压力字体{index}"),
+                            bytes: Some(vec![u8::try_from(index).unwrap(); 64]),
+                        },
+                    )
+                    .unwrap();
+            }
+            assert_eq!(model.resource_metrics().live, RESOURCES_PER_CYCLE);
+            assert_eq!(model.resource_usage().frame_bytes, 4 * 256);
+            assert_eq!(model.resource_usage().image_bytes, 4 * 64);
+            assert_eq!(model.resource_usage().font_bytes, 2 * 64);
+            assert_eq!(model.resource_usage().accessibility_nodes, 4);
+
+            model.begin_application_run(application).unwrap();
+            assert_eq!(model.request_application_exit(application), Ok(true));
+            assert_eq!(model.request_application_exit(application), Ok(false));
+            model.finish_application_run(application, None);
+            assert_eq!(model.close(application).unwrap().len(), RESOURCES_PER_CYCLE);
+            assert_eq!(
+                model.close(application),
+                Err(ModelError::Missing(application))
+            );
+            assert_eq!(model.resource_usage(), ResourceUsage::default());
+            assert_eq!(model.resource_metrics().live, 0);
+            assert_eq!(model.frame_metrics().pending, 0);
+            assert_eq!(model.accessibility_metrics().current_trees, 0);
+            assert_eq!(model.accessibility_metrics().current_nodes, 0);
+            assert_eq!(model.accessibility_metrics().current_text_bytes, 0);
+            assert_eq!(
+                model.application_lifecycle_summary(),
+                ApplicationLifecycle::Closed
+            );
+            assert_eq!(
+                model.application_metrics().closes,
+                u64::try_from(cycle + 1).unwrap()
+            );
+        }
+
+        let total_resources = u64::try_from(CYCLES * RESOURCES_PER_CYCLE).unwrap();
+        assert_eq!(
+            model.resource_metrics(),
+            ResourceMetrics {
+                live: 0,
+                high_watermark: RESOURCES_PER_CYCLE,
+                created: total_resources,
+                closed: total_resources,
+            }
+        );
+        assert_eq!(
+            model.application_metrics(),
+            ApplicationLifecycleMetrics {
+                runs_started: u64::try_from(CYCLES).unwrap(),
+                exit_requests: u64::try_from(CYCLES).unwrap(),
+                duplicate_exit_requests: u64::try_from(CYCLES).unwrap(),
+                exits: u64::try_from(CYCLES).unwrap(),
+                normal_exits: u64::try_from(CYCLES).unwrap(),
+                closes: u64::try_from(CYCLES).unwrap(),
+                resources_reclaimed: total_resources,
+                zeroed_closes: u64::try_from(CYCLES).unwrap(),
+                ..ApplicationLifecycleMetrics::default()
+            }
+        );
+    }
+
+    #[test]
     fn timers_fire_once_or_reschedule_without_drift() {
         let mut model = Model::default();
         let application = app(&mut model);
