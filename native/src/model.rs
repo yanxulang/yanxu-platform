@@ -884,12 +884,23 @@ impl Model {
     }
 
     #[must_use]
+    pub const fn remaining_image_bytes(&self) -> usize {
+        self.resource_limits
+            .image_bytes
+            .saturating_sub(self.resource_usage.image_bytes)
+    }
+
+    #[must_use]
     pub const fn quota_metrics(&self) -> QuotaMetrics {
         self.quota_metrics
     }
 
     pub fn record_quota_configuration_rejection(&mut self) {
         self.quota_metrics.record_configuration();
+    }
+
+    pub fn record_quota_limit_rejection(&mut self, kind: QuotaKind) {
+        self.quota_metrics.record_limit(kind);
     }
 
     fn checked_resource_usage(

@@ -10,8 +10,8 @@ use crate::bridge::{encode_data, free_value};
 use crate::data::Data;
 use crate::event::{EVENT_MAJOR, EVENT_MINOR, EventKind, PlatformEvent};
 use crate::model::{
-    FrameSubmission, Model, ModelError, QuotaMetrics, ResourceCreationError, ResourceKind,
-    ResourceLimits, ResourceState, ResourceUsage, TimerState, WindowState,
+    FrameSubmission, Model, ModelError, QuotaKind, QuotaMetrics, ResourceCreationError,
+    ResourceKind, ResourceLimits, ResourceState, ResourceUsage, TimerState, WindowState,
 };
 use crate::protocol;
 use crate::sync::{RecoverMutex, recovered_lock_count};
@@ -739,19 +739,10 @@ pub unsafe fn call(
             require_count(arguments, 2)?;
             let (parent_handle, application) =
                 unsafe { resource(arguments, 0, host, ResourceKind::Application) }?;
-            let (width, height, rgba) = decode_image(bytes(&arguments[1])?)?;
-            let id = application
-                .model
-                .lock_recover()
-                .create(
-                    Some(application.id),
-                    ResourceState::Image {
-                        width,
-                        height,
-                        rgba,
-                    },
-                )
-                .map_err(model_error_code)?;
+            let source = bytes(&arguments[1])?;
+            let mut model = application.model.lock_recover();
+            let id = create_loaded_image(&mut model, application.id, source, decode_image)?;
+            drop(model);
             Ok(resource_output(
                 application.model.clone(),
                 application.text.clone(),
@@ -1445,6 +1436,41 @@ fn create_loaded_font(
         .map_err(model_error_code)
 }
 
+fn create_loaded_image(
+    model: &mut Model,
+    application_id: u64,
+    source: &[u8],
+    decode: impl FnOnce(&[u8], usize) -> Result<(u32, u32, Vec<u8>), ImageDecodeError>,
+) -> Result<u64, &'static str> {
+    let placeholder = ResourceState::Image {
+        width: 0,
+        height: 0,
+        rgba: Vec::new(),
+    };
+    model
+        .preflight_create(Some(application_id), &placeholder)
+        .map_err(model_error_code)?;
+    let remaining_bytes = model.remaining_image_bytes();
+    let (width, height, rgba) = match decode(source, remaining_bytes) {
+        Ok(image) => image,
+        Err(ImageDecodeError::Invalid) => return Err("PLATFORM_IMAGE_INVALID"),
+        Err(ImageDecodeError::Quota) => {
+            model.record_quota_limit_rejection(QuotaKind::ImageBytes);
+            return Err(QuotaKind::ImageBytes.code());
+        }
+    };
+    model
+        .create(
+            Some(application_id),
+            ResourceState::Image {
+                width,
+                height,
+                rgba,
+            },
+        )
+        .map_err(model_error_code)
+}
+
 fn configured_limit(
     config: &BTreeMap<String, Data>,
     name: &str,
@@ -1791,23 +1817,65 @@ fn string_array(value: &Data) -> Result<Vec<String>, &'static str> {
         .collect()
 }
 
-fn decode_image(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), &'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageDecodeError {
+    Invalid,
+    Quota,
+}
+
+fn decode_image(bytes: &[u8], max_alloc: usize) -> Result<(u32, u32, Vec<u8>), ImageDecodeError> {
     if bytes.is_empty() {
-        return Err("PLATFORM_IMAGE_INVALID");
+        return Err(ImageDecodeError::Invalid);
     }
+    let (width, height) = limited_image_reader(bytes, max_alloc)?
+        .into_dimensions()
+        .map_err(image_decode_error)?;
+    let rgba_bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or(ImageDecodeError::Quota)?;
+    if rgba_bytes > max_alloc {
+        return Err(ImageDecodeError::Quota);
+    }
+    let decoded = limited_image_reader(bytes, max_alloc)?
+        .decode()
+        .map_err(image_decode_error)?;
+    let rgba = decoded.into_rgba8();
+    if rgba.len() != rgba_bytes {
+        return Err(ImageDecodeError::Invalid);
+    }
+    Ok((width, height, rgba.into_raw()))
+}
+
+fn limited_image_reader(
+    bytes: &[u8],
+    max_alloc: usize,
+) -> Result<image::ImageReader<Cursor<&[u8]>>, ImageDecodeError> {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(16_384);
     limits.max_image_height = Some(16_384);
-    limits.max_alloc = Some(256 * 1024 * 1024);
+    limits.max_alloc = Some(u64::try_from(max_alloc).unwrap_or(u64::MAX));
     let mut reader = image::ImageReader::new(Cursor::new(bytes));
     reader = reader
         .with_guessed_format()
-        .map_err(|_| "PLATFORM_IMAGE_INVALID")?;
+        .map_err(|_| ImageDecodeError::Invalid)?;
     reader.limits(limits);
-    let decoded = reader.decode().map_err(|_| "PLATFORM_IMAGE_INVALID")?;
-    let rgba = decoded.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    Ok((width, height, rgba.into_raw()))
+    Ok(reader)
+}
+
+fn image_decode_error(error: image::ImageError) -> ImageDecodeError {
+    match error {
+        image::ImageError::Limits(limit)
+            if matches!(
+                limit.kind(),
+                image::error::LimitErrorKind::InsufficientMemory
+            ) =>
+        {
+            ImageDecodeError::Quota
+        }
+        _ => ImageDecodeError::Invalid,
+    }
 }
 
 const fn validate_clipboard_text_length(length: usize) -> Result<(), &'static str> {
@@ -2446,16 +2514,87 @@ mod tests {
     }
 
     #[test]
+    fn image_quota_preflight_bounds_the_decoder_by_remaining_bytes() {
+        let limits = ResourceLimits {
+            resources: 2,
+            images: 0,
+            image_bytes: 8,
+            ..ResourceLimits::default()
+        };
+        let mut model = Model::with_limits(limits);
+        let application = model
+            .create(
+                None,
+                ResourceState::Application {
+                    name: "测试".to_owned(),
+                    exit_requested: false,
+                },
+            )
+            .unwrap();
+        let mut decoder_called = false;
+        assert_eq!(
+            create_loaded_image(&mut model, application, &[1], |_, _| {
+                decoder_called = true;
+                Ok((1, 1, vec![0; 4]))
+            }),
+            Err("PLATFORM_QUOTA_IMAGES")
+        );
+        assert!(!decoder_called);
+        assert_eq!(model.quota_metrics().images, 1);
+
+        let limits = ResourceLimits {
+            resources: 2,
+            images: 1,
+            image_bytes: 8,
+            ..ResourceLimits::default()
+        };
+        let mut model = Model::with_limits(limits);
+        let application = model
+            .create(
+                None,
+                ResourceState::Application {
+                    name: "测试".to_owned(),
+                    exit_requested: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            create_loaded_image(&mut model, application, &[1], |_, remaining| {
+                assert_eq!(remaining, 8);
+                Err(ImageDecodeError::Quota)
+            }),
+            Err("PLATFORM_QUOTA_IMAGE_BYTES")
+        );
+        assert_eq!(model.quota_metrics().image_bytes, 1);
+        assert!(!model.resource_limits_locked());
+
+        let image = create_loaded_image(&mut model, application, &[1], |_, remaining| {
+            assert_eq!(remaining, 8);
+            Ok((1, 1, vec![10, 20, 30, 255]))
+        })
+        .unwrap();
+        assert_eq!(model.resource_usage().image_bytes, 4);
+        assert_eq!(model.get(image).unwrap().state.kind(), ResourceKind::Image);
+    }
+
+    #[test]
     fn decodes_bounded_png_resources() {
         let source = image::RgbaImage::from_pixel(2, 1, image::Rgba([10, 20, 30, 255]));
         let mut encoded = Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(source)
             .write_to(&mut encoded, image::ImageFormat::Png)
             .unwrap();
-        let (width, height, rgba) = decode_image(encoded.get_ref()).unwrap();
+        let (width, height, rgba) = decode_image(encoded.get_ref(), 1_024).unwrap();
         assert_eq!([width, height], [2, 1]);
         assert_eq!(rgba, vec![10, 20, 30, 255, 10, 20, 30, 255]);
-        assert_eq!(decode_image(&[1, 2, 3]), Err("PLATFORM_IMAGE_INVALID"));
+        assert_eq!(
+            decode_image(encoded.get_ref(), 7),
+            Err(ImageDecodeError::Quota)
+        );
+        assert_eq!(
+            decode_image(&[1, 2, 3], 1_024),
+            Err(ImageDecodeError::Invalid)
+        );
     }
 
     #[test]
